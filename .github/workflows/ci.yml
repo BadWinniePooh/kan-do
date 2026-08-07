@@ -81,18 +81,33 @@ jobs:
       - run: pnpm --filter @kan-do/e2e exec playwright install --with-deps chromium
       - name: Wait for readiness
         run: |
+          # Probe the API as 127.0.0.1, not localhost: the server binds 0.0.0.0
+          # (IPv4 only), while "localhost" resolves to ::1 first inside the
+          # container, so the connection is refused and the loop never passes.
+          # The API's /healthz and /readyz sit at the root and nginx only proxies
+          # /api/, so they are NOT reachable through port 8080 — a request there
+          # hits the SPA fallback and returns index.html with 200 regardless of
+          # whether the API is up. Probe the proxy via /api/auth/me instead,
+          # which answers 401 unauthenticated and so proves nginx -> server works.
           for i in $(seq 1 60); do
-            if curl -fs http://localhost:8080/api/../healthz 2>/dev/null || curl -fs http://localhost:8080 >/dev/null; then
-              if docker compose exec -T server wget -qO- http://localhost:3001/readyz >/dev/null 2>&1; then exit 0; fi
+            if docker compose exec -T server wget -qO- http://127.0.0.1:3001/readyz >/dev/null 2>&1 \
+              && curl -fs http://127.0.0.1:8080/ >/dev/null \
+              && [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/auth/me)" = "401" ]; then
+              echo "stack ready after $((i * 2))s"
+              exit 0
             fi
             sleep 2
           done
+          echo "stack did not become ready within 120s"
+          docker compose ps
           docker compose logs server
           exit 1
       - name: Smoke test (core board/card flow)
         run: pnpm --filter @kan-do/e2e test
         env:
-          E2E_BASE_URL: http://localhost:8080
+          # same address the readiness gate proved reachable, so a green gate
+          # implies the tests can reach the stack
+          E2E_BASE_URL: http://127.0.0.1:8080
       - name: Stack logs on failure
         if: failure()
         run: docker compose logs
