@@ -1,0 +1,99 @@
+You are building "Kan-Do," a multi-tenant, kanban-style task tracker with recurring-task
+support, for web and Android. Design and implement the full application: architecture,
+data model, backend, frontend, Android app, CI/CD, and deployment artifacts. Where this
+spec leaves a technical choice open, pick a sensible, well-supported default and state
+the choice explicitly before proceeding.
+
+## Platforms & Stack
+- Targets: responsive web app + Android app. Choose whichever approach best delivers both
+  (e.g. single cross-platform codebase, or a PWA, or separate frontends) — your call, but
+  justify it briefly.
+- Android app is online-only (no offline cache/sync required).
+- Backend: your choice of language/framework, but must support real-time updates
+  (WebSockets) and be comfortably deployable in Docker.
+- Database: PostgreSQL, schema designed to scale beyond a small team (proper indexing,
+  avoid single-table-does-everything designs).
+- File storage: pictures/attachments go to S3-compatible object storage (e.g. MinIO
+  self-hosted), not local disk — app must only need an S3 endpoint + credentials via config.
+- Deployment: Dockerized (app + any workers), with a docker-compose for local/self-hosted
+  use. Provide a GitHub Actions workflow that builds and publishes the container image(s)
+  on push/tag.
+
+## Tenancy & Identity
+Three role tiers, each with its own UI — do not blend admin UI into the task-management UI:
+1. **Global Admin**: manages organizations (tenants) across the whole deployment, can
+   observe/manage any org, manages org admins. Own dedicated UI, unrelated to kanban boards.
+2. **Org Admin**: manages users within their organization only (invite, deactivate, assign
+   roles). Own dedicated UI, separate from the kanban board UI.
+3. **User**: normal kanban usage — boards, cards, dashboard. No admin capability.
+Authentication: support SSO/SAML and OIDC against an externally configured IdP (per
+organization, configurable by Global/Org admin), plus local username/password accounts as
+fallback. Design auth so a new IdP can be wired in via config, not code changes.
+
+## Boards & Columns
+- Each user (or team) can own one or more boards.
+- Boards have user-defined columns and lanes (swimlanes), freely created/reordered/renamed.
+- Every board must have at least one column semantically mapped to "open" and one mapped to
+  "done" (the underlying semantics — e.g. for recurrence and metrics — are fixed, but the
+  column's display name is fully renameable by the user).
+
+## Task Cards
+- Card shows: title, one cover picture (if set) shown directly on the card face, and owner
+  avatar badges.
+- Expanding a card reveals: full edit view, multiple markdown notes (each stored as raw
+  markdown for editing, rendered to HTML for viewing), and a gallery of additional pictures
+  beyond the single cover image.
+- Owners: a card may have zero, one, or multiple owners. Zero owners is the common/default
+  case for an "open" task.
+  - Registered-user owners show as a small avatar badge using their profile picture, or —
+    if no picture is set — their initials (all-caps, one letter per capitalized word in
+    their display name, e.g. "BadWinniePooh" -> "BWP").
+  - Non-user (external) owners are also supported, to represent external dependencies (a
+    person/team with no account in the system). They display similarly (initials-based
+    badge) but are clearly distinguishable from real user accounts (e.g. different badge
+    style/border) since they cannot log in or be assigned SSO identities.
+
+## Recurring Tasks
+- A task can have a recurrence rule. Support full RRULE-style scheduling (iCal RRULE
+  semantics: daily/weekly/monthly/custom weekday patterns, intervals, etc.), but expose it
+  through a plain-language, non-technical UI builder (e.g. "every 2 weeks", "every Monday
+  and Thursday") — users should never need to read/write raw RRULE syntax.
+- Recurrence lifecycle (this exact state machine):
+  1. Task is open, gets moved to "done" -> record `closed_at`.
+  2. Task is scheduled to automatically reopen (move back to "open") at
+     `closed_at + interval`, where `interval` is the task's recurrence period.
+  3. If the task is reopened and is *not* closed again before the next
+     `interval` elapses (counting from that reopen time), it is flagged overdue.
+  - i.e. overdue is always relative to time-since-last-close/reopen, not a fixed calendar
+    due date, for recurring tasks.
+- Non-recurring tasks: support a plain due date; overdue = past due date and not in a
+  "done"-mapped column.
+- Overdue tasks must be visually highlighted distinctly on the board (not just a label).
+
+## Metrics & Dashboard
+Track per task/card, computed from column-transition history:
+- Cycle time, lead time, waiting time, and time-spent-per-column.
+Provide a dashboard rendering these as charts, where the user can configure which metric
+widgets appear and how they're arranged (per board or org-wide view) — not a fixed,
+one-size layout.
+
+## Non-functional
+- Real-time: board changes (card moves, edits, new cards) propagate live to other viewers
+  of the same board via WebSockets, no manual refresh needed.
+- Notifications: overdue flags and recurring-task reopen events can notify via in-app,
+  email, and Android push — each channel independently toggleable per user in their
+  notification settings.
+
+## Deliverables
+1. Brief architecture write-up (stack choices + why, data model overview, deployment
+   topology).
+2. Full source code: backend, frontend/web, Android app, DB migrations.
+3. Dockerfiles + docker-compose for self-hosted deployment (app, DB, object storage, any
+   workers/schedulers needed for recurrence processing).
+4. GitHub Actions workflow(s) to build and publish container images.
+5. A README covering local dev setup, configuration (SSO/SAML, S3, email/push
+   credentials), and deployment steps.
+
+Ask clarifying questions before starting if any requirement above is ambiguous or
+technically conflicting; otherwise proceed and state assumptions explicitly as you make
+them.
