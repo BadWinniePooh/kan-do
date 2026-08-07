@@ -1,6 +1,6 @@
 import { useDraggable } from '@dnd-kit/core';
 import { describeRulePlain } from '../recurrenceText';
-import type { Card, OwnerRow } from '../types';
+import type { Card, Category, OwnerRow } from '../types';
 import OwnerBadge from './OwnerBadge';
 
 /**
@@ -12,11 +12,13 @@ export default function CardTile({
   card,
   owners,
   coverUrl,
+  category,
   onOpen,
 }: {
   card: Card;
   owners: OwnerRow[];
   coverUrl: string | null;
+  category: Category | null;
   onOpen: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -40,13 +42,23 @@ export default function CardTile({
       onKeyDown={(e) => {
         if (e.key === 'Enter') onOpen();
       }}
-      className={`bg-white rounded-lg shadow-sm border cursor-grab select-none hover:shadow-md transition-shadow ${
+      className={`bg-white rounded-lg shadow-sm border border-slate-200 cursor-grab select-none hover:shadow-md hover:-translate-y-px transition-all ${
         isDragging ? 'opacity-60' : ''
       } ${card.is_overdue ? 'card-overdue' : ''}`}
     >
-      {coverUrl && <img src={coverUrl} alt="" className="w-full h-24 object-cover rounded-t-lg" />}
+      {category && (
+        // category color accent: top bar + named chip below (color never alone)
+        <div aria-hidden className="h-1.5 rounded-t-lg" style={{ background: category.color }} />
+      )}
+      {coverUrl && <img src={coverUrl} alt="" className={`w-full h-24 object-cover ${category ? '' : 'rounded-t-lg'}`} />}
       <div className="p-2">
         <p className="text-sm font-medium leading-snug">{card.title}</p>
+        {category && (
+          <span className="inline-flex items-center gap-1 text-xs text-gray-600 mt-1" aria-label={`Category: ${category.name}`}>
+            <span aria-hidden className="w-2 h-2 rounded-full" style={{ background: category.color }} />
+            {category.name}
+          </span>
+        )}
         <div className="flex items-center mt-2 gap-1 min-h-[1.75rem]">
           {card.is_overdue && (
             <span className="text-xs font-semibold text-red-700 flex items-center gap-0.5" aria-hidden>

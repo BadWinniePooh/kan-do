@@ -98,9 +98,11 @@ export function authRoutes(ctx: AppCtx) {
       const user = await ctx.db.selectFrom('users').selectAll().where('id', '=', req.actor.userId).executeTakeFirst();
       if (!user || !user.active) return reply.code(401).send({ error: 'unauthenticated' });
       let orgSlug: string | null = null;
+      let orgName: string | null = null;
       if (user.org_id) {
-        const org = await ctx.db.selectFrom('organizations').select('slug').where('id', '=', user.org_id).executeTakeFirst();
+        const org = await ctx.db.selectFrom('organizations').select(['slug', 'name']).where('id', '=', user.org_id).executeTakeFirst();
         orgSlug = org?.slug ?? null;
+        orgName = org?.name ?? null;
       }
       return {
         id: user.id,
@@ -109,8 +111,47 @@ export function authRoutes(ctx: AppCtx) {
         role: user.role,
         orgId: user.org_id,
         orgSlug,
+        orgName,
         avatarUrl: user.avatar_key ? await ctx.storage.presignDownload(user.avatar_key) : null,
       };
+    });
+
+    /**
+     * All orgs this person can act in: accounts sharing the session email.
+     * (One human, one account row per org — invites and SSO JIT are keyed by
+     * email, so same email = same person by design.)
+     */
+    app.get('/my-orgs', async (req, reply) => {
+      if (!req.actor) return reply.code(401).send({ error: 'unauthenticated' });
+      const me = await ctx.db.selectFrom('users').select(['email']).where('id', '=', req.actor.userId).executeTakeFirst();
+      if (!me) return reply.code(401).send({ error: 'unauthenticated' });
+      return ctx.db
+        .selectFrom('users')
+        .innerJoin('organizations', 'organizations.id', 'users.org_id')
+        .select(['organizations.id', 'organizations.name', 'organizations.slug'])
+        .where('users.email', '=', me.email)
+        .where('users.active', '=', true)
+        .where('organizations.active', '=', true)
+        .orderBy('organizations.name')
+        .execute();
+    });
+
+    /** Switch the session to this person's account in another org. */
+    app.post('/switch-org', async (req, reply) => {
+      if (!req.actor) return reply.code(401).send({ error: 'unauthenticated' });
+      const body = z.object({ orgId: z.string().uuid() }).parse(req.body);
+      const me = await ctx.db.selectFrom('users').select('email').where('id', '=', req.actor.userId).executeTakeFirst();
+      if (!me) return reply.code(401).send({ error: 'unauthenticated' });
+      const target = await ctx.db
+        .selectFrom('users')
+        .selectAll()
+        .where('email', '=', me.email)
+        .where('org_id', '=', body.orgId)
+        .where('active', '=', true)
+        .executeTakeFirst();
+      if (!target) return reply.code(403).send({ error: 'no account in that organization' });
+      reply.setCookie(SESSION_COOKIE, await issueSession(target), cookieOpts);
+      return { ok: true };
     });
   };
 }

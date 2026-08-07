@@ -2,11 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------------------------------------------------------------------------
+ * Design tokens & base typography — single place for the app's look.
+ * Palette: slate ground, indigo accent; matches the validated chart palette
+ * (blue #2a78d6 family) and keeps WCAG contrast on all text.
+ * ------------------------------------------------------------------------- */
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  body {
+    @apply bg-slate-100 text-slate-900;
+    background-image: linear-gradient(180deg, theme('colors.slate.50'), theme('colors.slate.100') 240px);
+  }
+  h1 {
+    @apply tracking-tight;
+  }
+  h2 {
+    @apply tracking-tight;
+  }
+}
+
+@layer components {
+  /* primary action */
+  .btn-primary {
+    @apply bg-indigo-700 text-white rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm
+      hover:bg-indigo-800 active:bg-indigo-900 disabled:opacity-50 transition-colors;
+  }
+  /* neutral surface card */
+  .surface {
+    @apply bg-white rounded-xl border border-slate-200 shadow-sm;
+  }
+}
+
 /* Overdue: red left border + tinted background + icon (never color alone) */
 .card-overdue {
   @apply border-l-4 border-red-600 bg-red-50;
 }
 
 :focus-visible {
-  @apply outline outline-2 outline-blue-600 outline-offset-1;
+  @apply outline outline-2 outline-indigo-600 outline-offset-1;
+}
+
+/* board column surface */
+.board-column {
+  @apply bg-slate-200/60 backdrop-blur-[1px] rounded-2xl border border-slate-200/80;
 }

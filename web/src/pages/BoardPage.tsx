@@ -153,6 +153,7 @@ export default function BoardPage() {
                             card={card}
                             owners={ownersByCard.get(card.id) ?? []}
                             coverUrl={data.covers[card.id] ?? null}
+                            category={data.categories.find((cat) => cat.id === card.category_id) ?? null}
                             onOpen={() => setOpenCard(card.id)}
                           />
                         ))}
@@ -198,7 +199,7 @@ function ColumnDrop({ columnId, laneId, children }: { columnId: string; laneId: 
   return (
     <div
       ref={setNodeRef}
-      className={`bg-gray-200/70 rounded-xl p-2 w-64 shrink-0 transition-colors ${isOver ? 'bg-blue-100 ring-2 ring-blue-400' : ''}`}
+      className={`board-column p-2 w-64 shrink-0 transition-all ${isOver ? '!bg-indigo-100 ring-2 ring-indigo-400' : ''}`}
     >
       {children}
     </div>

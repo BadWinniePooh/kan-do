@@ -1,68 +1,82 @@
 /**
- * Smoke-level e2e: the core board/card flow only, per the testing pyramid.
- * Runs against a full docker-compose stack (see CI e2e job).
+ * Smoke-level e2e: core board/card flow + org-admin bootstrap flow.
+ *
+ * Data hygiene rules (the point of this file's structure):
+ *  - setup creates a DEDICATED org with a unique slug for this run; every
+ *    action happens inside it — nothing ever touches "whichever org exists".
+ *  - teardown deletes that org (FK cascade removes its users/boards/cards),
+ *    pass or fail, so no residue is left in the target deployment.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type APIRequestContext } from '@playwright/test';
 
 const ADMIN_EMAIL = 'admin@example.com';
 const ADMIN_PASSWORD = 'admin1234';
-const USER_EMAIL = 'smoke@test.io';
+
+const RUN = `${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
+const ORG_SLUG = `smoke-${RUN}`;
+const ORG_NAME = `Smoke Org ${RUN}`;
+const USER_EMAIL = `smoke-${RUN}@test.io`;
 const USER_PASSWORD = 'smokepass1';
+const ORGADMIN_EMAIL = `orgadmin-${RUN}@test.io`;
+
+let orgId: string;
+let adminCookie: string;
 
 test.describe.configure({ mode: 'serial' });
 
-test('global admin creates an org and a user', async ({ page, request }) => {
-  await page.goto('/');
-  await page.getByLabel('Email').fill(ADMIN_EMAIL);
-  await page.getByLabel('Password').fill(ADMIN_PASSWORD);
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByRole('heading', { name: 'Organizations' })).toBeVisible();
+async function apiLogin(request: APIRequestContext, email: string, password: string): Promise<string> {
+  const res = await request.post('/api/auth/login', { data: { email, password } });
+  expect(res.ok(), `login as ${email}`).toBe(true);
+  const setCookie = res.headers()['set-cookie']!;
+  return setCookie.split(';')[0]!;
+}
 
-  // idempotent seed via API using the admin session
-  const cookies = await page.context().cookies();
-  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-  const orgs = await (await request.get('/api/admin/orgs', { headers: { cookie: cookieHeader } })).json();
-  let org = orgs.find((o: { slug: string }) => o.slug === 'smoke-org');
-  if (!org) {
-    org = await (
-      await request.post('/api/admin/orgs', {
-        headers: { cookie: cookieHeader },
-        data: { name: 'Smoke Org', slug: 'smoke-org' },
-      })
-    ).json();
-  }
-  const users = await (await request.get(`/api/orgs/${org.id}/users`, { headers: { cookie: cookieHeader } })).json();
-  if (!users.some((u: { email: string }) => u.email === USER_EMAIL)) {
-    const created = await request.post(`/api/orgs/${org.id}/users`, {
-      headers: { cookie: cookieHeader },
-      data: { email: USER_EMAIL, displayName: 'Smoke Tester', password: USER_PASSWORD },
-    });
-    expect(created.ok()).toBe(true);
-  }
+test.beforeAll(async ({ request }) => {
+  adminCookie = await apiLogin(request, ADMIN_EMAIL, ADMIN_PASSWORD);
+  const created = await request.post('/api/admin/orgs', {
+    headers: { cookie: adminCookie },
+    data: { name: ORG_NAME, slug: ORG_SLUG },
+  });
+  expect(created.ok(), 'dedicated smoke org must be created').toBe(true);
+  orgId = (await created.json()).id;
+
+  const user = await request.post(`/api/orgs/${orgId}/users`, {
+    headers: { cookie: adminCookie },
+    data: { email: USER_EMAIL, displayName: 'Smoke Tester', password: USER_PASSWORD },
+  });
+  expect(user.ok(), 'smoke user must be created inside the smoke org').toBe(true);
 });
 
-test('global admin creates an ORG ADMIN via UI; org admin sees admin nav', async ({ page }) => {
-  const adminEmail = `orgadmin-${Date.now()}@test.io`;
+test.afterAll(async ({ request }) => {
+  // teardown runs pass or fail; deleting the org cascades to all test data
+  if (!orgId) return;
+  const cookie = adminCookie ?? (await apiLogin(request, ADMIN_EMAIL, ADMIN_PASSWORD));
+  const res = await request.delete(`/api/admin/orgs/${orgId}`, { headers: { cookie } });
+  expect(res.ok(), 'smoke org teardown').toBe(true);
+});
 
+test('global admin creates an ORG ADMIN via UI (scoped to the smoke org); org admin sees admin nav', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Email').fill(ADMIN_EMAIL);
   await page.getByLabel('Password').fill(ADMIN_PASSWORD);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Organizations' })).toBeVisible();
 
-  await page.getByRole('button', { name: 'Manage users' }).first().click();
+  // strictly target OUR org's row — never .first()
+  const orgRow = page.getByRole('row', { name: new RegExp(ORG_SLUG) });
+  await orgRow.getByRole('button', { name: 'Manage users' }).click();
+
   const form = page.locator('form[aria-label="Create user in organization"]');
-  await form.getByLabel('Email').fill(adminEmail);
+  await form.getByLabel('Email').fill(ORGADMIN_EMAIL);
   await form.getByLabel('Display name').fill('E2E OrgAdmin');
   await form.getByLabel('Initial password (min 8)').fill('e2epassword1');
   await form.getByLabel('Role').selectOption('org_admin');
   await form.getByRole('button', { name: 'Create user' }).click();
-  await expect(page.getByRole('cell', { name: adminEmail })).toBeVisible();
+  await expect(page.getByRole('cell', { name: ORGADMIN_EMAIL })).toBeVisible();
 
-  // the freshly created org admin can log in and gets the Org Admin UI
   await page.getByRole('button', { name: 'Log out' }).click();
-  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible(); // full reload lands on login
-  await page.getByLabel('Email').fill(adminEmail);
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  await page.getByLabel('Email').fill(ORGADMIN_EMAIL);
   await page.getByLabel('Password').fill('e2epassword1');
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('link', { name: 'Org Admin' })).toBeVisible();
@@ -75,12 +89,11 @@ test('user logs in, creates board, adds and opens a card', async ({ page }) => {
   await page.getByRole('button', { name: 'Sign in' }).click();
 
   await expect(page.getByRole('heading', { name: 'Your boards' })).toBeVisible();
-  const boardName = `Smoke board ${Date.now()}`;
+  const boardName = `Smoke board ${RUN}`;
   await page.getByLabel('New board name').fill(boardName);
   await page.getByRole('button', { name: 'Create' }).click();
   await page.getByRole('link', { name: boardName }).click();
 
-  // default columns exist, with open/done semantics visible
   await expect(page.getByRole('heading', { name: 'Open' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Done' })).toBeVisible();
 
@@ -90,7 +103,6 @@ test('user logs in, creates board, adds and opens a card', async ({ page }) => {
   const card = page.getByRole('button', { name: /Card: Water the plants/ });
   await expect(card).toBeVisible();
 
-  // expand the card, add a markdown note
   await card.click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByLabel('New note (markdown supported)').fill('**remember** the balcony');

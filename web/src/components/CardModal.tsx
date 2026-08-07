@@ -75,6 +75,35 @@ export default function CardModal({ cardId, board, onClose }: { cardId: string; 
             <p role="alert" className="text-sm text-red-700">⚠ Save failed: {update.error.message}</p>
           )}
 
+          <section aria-label="Category">
+            <h3 className="text-sm font-semibold text-gray-500 mb-1">Category</h3>
+            <div className="flex items-center gap-2">
+              {card.category_id && (
+                <span
+                  aria-hidden
+                  className="w-3 h-3 rounded-full"
+                  style={{ background: board.categories.find((c) => c.id === card.category_id)?.color }}
+                />
+              )}
+              <label className="sr-only" htmlFor="card-category">
+                Card category
+              </label>
+              <select
+                id="card-category"
+                value={card.category_id ?? ''}
+                onChange={(e) => update.mutate({ categoryId: e.target.value || null })}
+                className="border rounded px-2 py-1 text-sm"
+              >
+                <option value="">No category</option>
+                {board.categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </section>
+
           <section aria-label="Owners">
             <h3 className="text-sm font-semibold text-gray-500 mb-1">Owners</h3>
             <div className="flex items-center gap-2 flex-wrap">

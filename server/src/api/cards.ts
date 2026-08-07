@@ -41,6 +41,7 @@ export function cardRoutes(ctx: AppCtx) {
           title: z.string().min(1).max(500).optional(),
           description: z.string().max(20000).nullable().optional(),
           laneId: z.string().uuid().nullable().optional(),
+          categoryId: z.string().uuid().nullable().optional(),
           dueDate: z.string().datetime().nullable().optional(),
           recurrenceRule: recurrenceSchema.nullable().optional(),
           coverAttachmentId: z.string().uuid().nullable().optional(),

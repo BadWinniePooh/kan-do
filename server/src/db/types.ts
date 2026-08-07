@@ -79,11 +79,21 @@ export interface ExternalOwnersTable {
   updated_at: Updated;
 }
 
+export interface CategoriesTable {
+  id: Generated<string>;
+  org_id: string;
+  name: string;
+  color: string;
+  created_at: Created;
+  updated_at: Updated;
+}
+
 export interface CardsTable {
   id: Generated<string>;
   board_id: string;
   column_id: string;
   lane_id: string | null;
+  category_id: string | null;
   position: Generated<number>;
   title: string;
   description: string | null;
@@ -178,6 +188,7 @@ export interface NotificationLedgerTable {
 }
 
 export interface DB {
+  categories: CategoriesTable;
   organizations: OrganizationsTable;
   users: UsersTable;
   idp_configs: IdpConfigsTable;

@@ -7,6 +7,7 @@ export interface Me {
   role: Role;
   orgId: string | null;
   orgSlug: string | null;
+  orgName: string | null;
   avatarUrl: string | null;
 }
 
@@ -30,11 +31,18 @@ export interface Lane {
   position: number;
 }
 
+export interface Category {
+  id: string;
+  name: string;
+  color: string;
+}
+
 export interface Card {
   id: string;
   board_id: string;
   column_id: string;
   lane_id: string | null;
+  category_id: string | null;
   position: number;
   title: string;
   description: string | null;
@@ -64,6 +72,7 @@ export interface BoardDetail {
   members: { id: string; display_name: string; avatar_key: string | null; is_owner: boolean }[];
   cards: Card[];
   owners: (OwnerRow & { card_id: string })[];
+  categories: Category[];
 }
 
 export interface Note {

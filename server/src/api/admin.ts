@@ -61,6 +61,13 @@ export function globalAdminRoutes(ctx: AppCtx) {
         .executeTakeFirstOrThrow();
     });
 
+    /** Deletes the org and, via FK cascade, all its users/boards/cards/etc. */
+    app.delete('/orgs/:orgId', async (req) => {
+      const { orgId } = req.params as { orgId: string };
+      await ctx.db.deleteFrom('organizations').where('id', '=', orgId).execute();
+      return { ok: true };
+    });
+
     app.get('/orgs/:orgId/users', async (req) => {
       const { orgId } = req.params as { orgId: string };
       return ctx.db

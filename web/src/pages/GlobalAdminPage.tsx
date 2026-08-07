@@ -1,7 +1,7 @@
 /** Global Admin UI — deployment-wide org management. No kanban UI here. */
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { get, post, patch, ApiError } from '../api';
+import { get, post, patch, del, ApiError } from '../api';
 
 interface Org {
   id: string;
@@ -101,6 +101,20 @@ export default function GlobalAdminPage() {
                     onClick={() => patch(`/api/admin/orgs/${o.id}`, { active: !o.active }).then(refresh)}
                   >
                     {o.active ? 'Suspend' : 'Reactivate'}
+                  </button>
+                  <button
+                    className="text-xs underline text-red-700"
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete organization "${o.name}" with ALL its users, boards and cards? This cannot be undone.`,
+                        )
+                      ) {
+                        void del(`/api/admin/orgs/${o.id}`).then(refresh);
+                      }
+                    }}
+                  >
+                    Delete
                   </button>
                 </td>
               </tr>

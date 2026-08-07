@@ -74,6 +74,7 @@ export interface CardPatch {
   title?: string;
   description?: string | null;
   laneId?: string | null;
+  categoryId?: string | null;
   dueDate?: string | null;
   recurrenceRule?: RecurrenceRule | null;
   coverAttachmentId?: string | null;
@@ -88,6 +89,20 @@ export async function updateCard(ctx: AppCtx, actor: Actor, cardId: string, patc
   if (patch.laneId !== undefined) {
     // never allow a card to go lane-less while the board has lanes
     set.lane_id = patch.laneId ?? (await firstLaneId(ctx.db, card.board_id));
+  }
+  if (patch.categoryId !== undefined) {
+    if (patch.categoryId !== null) {
+      // tenancy: category must belong to the board's org
+      const board = await ctx.db.selectFrom('boards').select('org_id').where('id', '=', card.board_id).executeTakeFirstOrThrow();
+      const cat = await ctx.db
+        .selectFrom('categories')
+        .select('id')
+        .where('id', '=', patch.categoryId)
+        .where('org_id', '=', board.org_id)
+        .executeTakeFirst();
+      if (!cat) throw badRequest('category does not belong to this organization');
+    }
+    set.category_id = patch.categoryId;
   }
   if (patch.coverAttachmentId !== undefined) set.cover_attachment_id = patch.coverAttachmentId;
   if (patch.dueDate !== undefined) {

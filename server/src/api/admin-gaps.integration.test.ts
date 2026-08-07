@@ -19,6 +19,11 @@ import { createDb } from '../db/index.js';
 import type { AppCtx } from '../services/context.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
+const RUN = `${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
+const rootEmail = `root2-${RUN}@test.io`;
+const aliceEmail = `alice2-${RUN}@test.io`;
+const carolEmail = `carol2-${RUN}@test.io`;
+const bobEmail = `bob2-${RUN}@test.io`;
 
 describe.skipIf(!hasDb)('admin & board management gaps', () => {
   let app: FastifyInstance;
@@ -54,33 +59,34 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
     };
     app = await buildApp(ctx);
 
+    // rows unique to this run; never blanket-delete ambient data
     const hash = await bcrypt.hash('pass12345', 4);
-    await db.deleteFrom('organizations').execute();
-    await db.deleteFrom('users').execute();
     await db
       .insertInto('users')
-      .values({ org_id: null, email: 'root2@test.io', display_name: 'Root', role: 'global_admin', password_hash: hash })
+      .values({ org_id: null, email: rootEmail, display_name: 'Root', role: 'global_admin', password_hash: hash })
       .execute();
-    const a = await db.insertInto('organizations').values({ name: 'Gap Org A', slug: 'gap-a' }).returning('id').executeTakeFirstOrThrow();
-    const b = await db.insertInto('organizations').values({ name: 'Gap Org B', slug: 'gap-b' }).returning('id').executeTakeFirstOrThrow();
+    const a = await db.insertInto('organizations').values({ name: 'Gap Org A', slug: `gap-a-${RUN}` }).returning('id').executeTakeFirstOrThrow();
+    const b = await db.insertInto('organizations').values({ name: 'Gap Org B', slug: `gap-b-${RUN}` }).returning('id').executeTakeFirstOrThrow();
     orgA = a.id;
     orgB = b.id;
     await db
       .insertInto('users')
       .values([
-        { org_id: orgA, email: 'alice2@test.io', display_name: 'Alice', role: 'user', password_hash: hash },
-        { org_id: orgA, email: 'carol2@test.io', display_name: 'Carol', role: 'user', password_hash: hash },
-        { org_id: orgB, email: 'bob2@test.io', display_name: 'Bob', role: 'user', password_hash: hash },
+        { org_id: orgA, email: aliceEmail, display_name: 'Alice', role: 'user', password_hash: hash },
+        { org_id: orgA, email: carolEmail, display_name: 'Carol', role: 'user', password_hash: hash },
+        { org_id: orgB, email: bobEmail, display_name: 'Bob', role: 'user', password_hash: hash },
       ])
       .execute();
 
-    rootCookie = (await login('root2@test.io', 'pass12345')).cookie;
-    alice = await login('alice2@test.io', 'pass12345');
-    carol = await login('carol2@test.io', 'pass12345');
-    bob = await login('bob2@test.io', 'pass12345');
+    rootCookie = (await login(rootEmail, 'pass12345')).cookie;
+    alice = await login(aliceEmail, 'pass12345');
+    carol = await login(carolEmail, 'pass12345');
+    bob = await login(bobEmail, 'pass12345');
   });
 
   afterAll(async () => {
+    await ctx.db.deleteFrom('organizations').where('id', 'in', [orgA, orgB]).execute();
+    await ctx.db.deleteFrom('users').where('email', '=', rootEmail).execute();
     await app.close();
     await ctx.db.destroy();
   });
@@ -92,7 +98,7 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
         method: 'POST',
         url: `/api/orgs/${orgA}/users`,
         headers: { cookie: rootCookie },
-        payload: { email: 'new-user@test.io', displayName: 'New User', password: 'longpass1' },
+        payload: { email: `new-user-${RUN}@test.io`, displayName: 'New User', password: 'longpass1' },
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().role).toBe('user');
@@ -103,12 +109,12 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
         method: 'POST',
         url: `/api/orgs/${orgA}/users`,
         headers: { cookie: rootCookie },
-        payload: { email: 'new-admin@test.io', displayName: 'New Admin', password: 'longpass1', role: 'org_admin' },
+        payload: { email: `new-admin-${RUN}@test.io`, displayName: 'New Admin', password: 'longpass1', role: 'org_admin' },
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().role).toBe('org_admin');
       // the new org admin can actually use admin powers
-      const admin = await login('new-admin@test.io', 'longpass1');
+      const admin = await login(`new-admin-${RUN}@test.io`, 'longpass1');
       const list = await app.inject({ method: 'GET', url: `/api/orgs/${orgA}/users`, headers: { cookie: admin.cookie } });
       expect(list.statusCode).toBe(200);
     });
@@ -118,7 +124,7 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
         method: 'POST',
         url: `/api/orgs/${orgA}/users`,
         headers: { cookie: rootCookie },
-        payload: { email: 'alice2@test.io', displayName: 'Dup', password: 'longpass1' },
+        payload: { email: aliceEmail, displayName: 'Dup', password: 'longpass1' },
       });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toMatch(/exists/i);
@@ -129,7 +135,7 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
         method: 'POST',
         url: `/api/orgs/${orgA}/users`,
         headers: { cookie: rootCookie },
-        payload: { email: 'x@test.io', displayName: 'X', password: 'short' },
+        payload: { email: `x-${RUN}@test.io`, displayName: 'X', password: 'short' },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().fields.some((f: { path: string }) => f.path === 'password')).toBe(true);
@@ -140,7 +146,7 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
         method: 'POST',
         url: `/api/orgs/${orgA}/users`,
         headers: { cookie: alice.cookie },
-        payload: { email: 'nope@test.io', displayName: 'Nope', password: 'longpass1' },
+        payload: { email: `nope-${RUN}@test.io`, displayName: 'Nope', password: 'longpass1' },
       });
       expect(res.statusCode).toBe(403);
     });
@@ -209,8 +215,8 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
       const res = await app.inject({ method: 'GET', url: '/api/me/org-users', headers: { cookie: alice.cookie } });
       expect(res.statusCode).toBe(200);
       const emails = res.json().map((u: { email: string }) => u.email);
-      expect(emails).toContain('carol2@test.io');
-      expect(emails).not.toContain('bob2@test.io'); // no cross-tenant leak
+      expect(emails).toContain(carolEmail);
+      expect(emails).not.toContain(bobEmail); // no cross-tenant leak
     });
 
     it('member adds a same-org member; new member can view the board', async () => {
@@ -275,13 +281,13 @@ describe.skipIf(!hasDb)('admin & board management gaps', () => {
       const oldLogin = await app.inject({
         method: 'POST',
         url: '/api/auth/login',
-        payload: { email: 'carol2@test.io', password: 'pass12345' },
+        payload: { email: carolEmail, password: 'pass12345' },
       });
       expect(oldLogin.statusCode).toBe(401);
       const newLogin = await app.inject({
         method: 'POST',
         url: '/api/auth/login',
-        payload: { email: 'carol2@test.io', password: 'brandnewpass1' },
+        payload: { email: carolEmail, password: 'brandnewpass1' },
       });
       expect(newLogin.statusCode).toBe(200);
     });

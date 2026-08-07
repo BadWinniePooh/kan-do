@@ -12,6 +12,10 @@ import { createDb } from '../db/index.js';
 import type { AppCtx } from '../services/context.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
+const RUN = `${Date.now()}-${Math.floor(Math.random() * 1e4)}`;
+const rootEmail = `root-${RUN}@test.io`;
+const aliceEmail = `alice-${RUN}@test.io`;
+const bobEmail = `bob-${RUN}@test.io`;
 
 const stubStorage = {
   presignUpload: async () => 'http://stub/upload',
@@ -58,38 +62,40 @@ describe.skipIf(!hasDb)('API integration', () => {
     };
     app = await buildApp(ctx);
 
-    // seed: global admin + two orgs + one user each
+    // seed: global admin + two orgs + one user each — all rows unique to this
+    // run; never delete or touch data this test didn't create
     const hash = await bcrypt.hash('pass12345', 4);
-    await db.deleteFrom('organizations').execute();
-    await db.deleteFrom('users').execute();
     await db
       .insertInto('users')
-      .values({ org_id: null, email: 'root@test.io', display_name: 'Root', role: 'global_admin', password_hash: hash })
+      .values({ org_id: null, email: rootEmail, display_name: 'Root', role: 'global_admin', password_hash: hash })
       .execute();
-    const a = await db.insertInto('organizations').values({ name: 'Org A', slug: 'org-a' }).returning('id').executeTakeFirstOrThrow();
-    const b = await db.insertInto('organizations').values({ name: 'Org B', slug: 'org-b' }).returning('id').executeTakeFirstOrThrow();
+    const a = await db.insertInto('organizations').values({ name: 'Org A', slug: `api-a-${RUN}` }).returning('id').executeTakeFirstOrThrow();
+    const b = await db.insertInto('organizations').values({ name: 'Org B', slug: `api-b-${RUN}` }).returning('id').executeTakeFirstOrThrow();
     orgA = a.id;
     orgB = b.id;
     await db
       .insertInto('users')
       .values([
-        { org_id: orgA, email: 'alice@test.io', display_name: 'Alice Alpha', role: 'user', password_hash: hash },
-        { org_id: orgB, email: 'bob@test.io', display_name: 'Bob Beta', role: 'user', password_hash: hash },
+        { org_id: orgA, email: aliceEmail, display_name: 'Alice Alpha', role: 'user', password_hash: hash },
+        { org_id: orgB, email: bobEmail, display_name: 'Bob Beta', role: 'user', password_hash: hash },
       ])
       .execute();
 
-    adminCookie = await login('root@test.io', 'pass12345');
-    aliceCookie = await login('alice@test.io', 'pass12345');
-    bobCookie = await login('bob@test.io', 'pass12345');
+    adminCookie = await login(rootEmail, 'pass12345');
+    aliceCookie = await login(aliceEmail, 'pass12345');
+    bobCookie = await login(bobEmail, 'pass12345');
   });
 
   afterAll(async () => {
+    // teardown own data only (org cascade removes org users/boards/cards)
+    await ctx.db.deleteFrom('organizations').where('id', 'in', [orgA, orgB]).execute();
+    await ctx.db.deleteFrom('users').where('email', '=', rootEmail).execute();
     await app.close();
     await ctx.db.destroy();
   });
 
   it('rejects bad credentials', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { email: 'alice@test.io', password: 'wrong' } });
+    const res = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { email: aliceEmail, password: 'wrong' } });
     expect(res.statusCode).toBe(401);
   });
 

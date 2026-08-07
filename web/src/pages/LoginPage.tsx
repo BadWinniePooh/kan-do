@@ -40,9 +40,12 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-100">
-      <form onSubmit={submit} className="bg-white p-8 rounded-lg shadow max-w-sm w-full space-y-4" aria-label="Login form">
-        <h1 className="text-2xl font-bold text-center">Kan-Do</h1>
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 px-4">
+      <form onSubmit={submit} className="bg-white p-8 rounded-2xl shadow-xl max-w-sm w-full space-y-4" aria-label="Login form">
+        <h1 className="text-3xl font-bold text-center tracking-tight">
+          Kan<span className="text-indigo-600">-</span>Do
+        </h1>
+        <p className="text-center text-sm text-gray-500 -mt-2">Kanban with recurring tasks</p>
         <div>
           <label htmlFor="org" className="block text-sm font-medium">
             Organization <span className="text-gray-400">(optional)</span>

@@ -56,7 +56,8 @@ export async function createBoard(ctx: AppCtx, actor: Actor, name: string) {
 
 export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string) {
   await assertBoardAccess(ctx.db, actor, boardId, 'view');
-  const [board, columns, lanes, members, cards] = await Promise.all([
+  const orgIdRow = await ctx.db.selectFrom('boards').select('org_id').where('id', '=', boardId).executeTakeFirstOrThrow();
+  const [board, columns, lanes, members, cards, categories] = await Promise.all([
     ctx.db.selectFrom('boards').selectAll().where('id', '=', boardId).executeTakeFirstOrThrow(),
     ctx.db.selectFrom('board_columns').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
     ctx.db.selectFrom('lanes').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
@@ -67,6 +68,7 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
       .where('board_members.board_id', '=', boardId)
       .execute(),
     ctx.db.selectFrom('cards').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
+    ctx.db.selectFrom('categories').selectAll().where('org_id', '=', orgIdRow.org_id).orderBy('name').execute(),
   ]);
   const cardIds = cards.map((c) => c.id);
   const owners = cardIds.length
@@ -110,7 +112,7 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
       if (key) covers[c.id] = await ctx.storage.presignDownload(key);
     }
   }
-  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers };
+  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers, categories };
 }
 
 export async function updateBoard(ctx: AppCtx, actor: Actor, boardId: string, patch: { name?: string }) {

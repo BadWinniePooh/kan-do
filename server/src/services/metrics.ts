@@ -45,6 +45,28 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
         .execute()
     : [];
 
+  // "time since done": aging of cards currently resting in a done column —
+  // reported separately because dwell there is expected, not a bottleneck
+  const doneAges: number[] = [];
+  if (doneColumnIds.length) {
+    const resting = await ctx.db
+      .selectFrom('cards')
+      .select(['id'])
+      .where('board_id', '=', boardId)
+      .where('column_id', 'in', doneColumnIds)
+      .execute();
+    for (const c of resting) {
+      const last = await ctx.db
+        .selectFrom('card_transitions')
+        .select('at')
+        .where('card_id', '=', c.id)
+        .orderBy('at', 'desc')
+        .limit(1)
+        .executeTakeFirst();
+      if (last) doneAges.push(now.getTime() - new Date(last.at).getTime());
+    }
+  }
+
   const overdueCount = await ctx.db
     .selectFrom('cards')
     .select(({ fn }) => fn.countAll().as('n'))
@@ -61,6 +83,7 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
       meanLeadTimeMs: meanMs(perCard.map((c) => c.leadTimeMs)),
       meanCycleTimeMs: meanMs(perCard.map((c) => c.cycleTimeMs)),
       meanWaitingTimeMs: meanMs(perCard.map((c) => c.waitingTimeMs)),
+      meanDoneAgeMs: meanMs(doneAges.length ? doneAges : [null]),
       perColumnMeanMs: columns.map((col) => ({
         columnId: col.id,
         name: col.name,

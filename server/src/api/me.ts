@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { AppCtx } from '../services/context.js';
 import { requireAuth } from '../auth/plugin.js';
+import { runPivotQuery } from '../services/pivotQuery.js';
+import { DIMENSIONS, METRICS, AGGREGATIONS } from '../domain/pivot.js';
 
 export function meRoutes(ctx: AppCtx) {
   return async (app: FastifyInstance) => {
@@ -77,6 +79,49 @@ export function meRoutes(ctx: AppCtx) {
         .executeTakeFirstOrThrow();
     });
 
+    // ---- categories: org-scoped card classification (name + color), managed
+    // by any org user — same trust level as external owners ----
+    app.get('/categories', async (req, reply) => {
+      if (!req.actor!.orgId) return reply.code(400).send({ error: 'not in an organization' });
+      return ctx.db.selectFrom('categories').selectAll().where('org_id', '=', req.actor!.orgId).orderBy('name').execute();
+    });
+
+    app.post('/categories', async (req, reply) => {
+      if (!req.actor!.orgId) return reply.code(400).send({ error: 'not in an organization' });
+      const body = z
+        .object({ name: z.string().min(1).max(100), color: z.string().regex(/^#[0-9a-fA-F]{6}$/) })
+        .parse(req.body);
+      return ctx.db
+        .insertInto('categories')
+        .values({ org_id: req.actor!.orgId, name: body.name, color: body.color })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+    });
+
+    app.patch('/categories/:id', async (req, reply) => {
+      if (!req.actor!.orgId) return reply.code(400).send({ error: 'not in an organization' });
+      const { id } = req.params as { id: string };
+      const body = z
+        .object({ name: z.string().min(1).max(100).optional(), color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional() })
+        .parse(req.body);
+      const updated = await ctx.db
+        .updateTable('categories')
+        .set({ ...body, updated_at: new Date() })
+        .where('id', '=', id)
+        .where('org_id', '=', req.actor!.orgId)
+        .returningAll()
+        .executeTakeFirst();
+      if (!updated) return reply.code(404).send({ error: 'category not found' });
+      return updated;
+    });
+
+    app.delete('/categories/:id', async (req, reply) => {
+      if (!req.actor!.orgId) return reply.code(400).send({ error: 'not in an organization' });
+      const { id } = req.params as { id: string };
+      await ctx.db.deleteFrom('categories').where('id', '=', id).where('org_id', '=', req.actor!.orgId).execute();
+      return { ok: true }; // cards referencing it fall back to no category (FK SET NULL)
+    });
+
     // ---- org user directory: light list for board-member picking (no roles,
     // no admin data) — scoped to the caller's own org ----
     app.get('/org-users', async (req, reply) => {
@@ -122,9 +167,19 @@ export function meRoutes(ctx: AppCtx) {
           layout: z.array(
             z.object({
               id: z.string(),
-              widget: z.enum(['lead', 'cycle', 'waiting', 'perColumn', 'overdueCount', 'throughput']),
+              widget: z.enum(['lead', 'cycle', 'waiting', 'doneAge', 'perColumn', 'overdueCount', 'throughput', 'custom']),
               w: z.number().int().min(1).max(12),
               h: z.number().int().min(1).max(12),
+              /** custom pivot widget definition */
+              def: z
+                .object({
+                  title: z.string().min(1).max(100),
+                  dimensions: z.array(z.enum(DIMENSIONS)).min(1).max(2),
+                  metric: z.enum(METRICS),
+                  aggregation: z.enum(AGGREGATIONS),
+                  viz: z.enum(['table', 'bar', 'line', 'pie']),
+                })
+                .optional(),
             }),
           ),
         })
@@ -148,6 +203,19 @@ export function meRoutes(ctx: AppCtx) {
         .values({ user_id: req.actor!.userId, board_id: body.boardId, layout: JSON.stringify(body.layout) })
         .returningAll()
         .executeTakeFirstOrThrow();
+    });
+
+    // ---- custom widget pivot query (tenancy enforced in runPivotQuery) ----
+    app.post('/dashboard/query', async (req) => {
+      const body = z
+        .object({
+          dimensions: z.array(z.enum(DIMENSIONS)).min(1).max(2),
+          metric: z.enum(METRICS),
+          aggregation: z.enum(AGGREGATIONS),
+          boardIds: z.array(z.string().uuid()).max(50).optional(),
+        })
+        .parse(req.body);
+      return runPivotQuery(ctx, req.actor!, body);
     });
 
     // ---- uploads (presigned; the browser PUTs directly to object storage) ----
