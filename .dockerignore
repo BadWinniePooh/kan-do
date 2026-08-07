@@ -13,3 +13,4 @@ web/android
 .env.*
 !.env.example
 coverage
+claude.resume
