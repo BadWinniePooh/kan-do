@@ -19,6 +19,8 @@ export class HttpError extends Error {
   constructor(
     public statusCode: number,
     message: string,
+    /** machine-readable payload the client acts on (e.g. a blocked move's checklist) */
+    public details?: unknown,
   ) {
     super(message);
   }
@@ -27,3 +29,4 @@ export class HttpError extends Error {
 export const notFound = (what = 'resource') => new HttpError(404, `${what} not found`);
 export const forbidden = () => new HttpError(403, 'forbidden');
 export const badRequest = (msg: string) => new HttpError(400, msg);
+export const conflict = (msg: string, details?: unknown) => new HttpError(409, msg, details);

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppCtx } from '../services/context.js';
 import * as cards from '../services/cards.js';
+import * as policies from '../services/policies.js';
 import { requireAuth } from '../auth/plugin.js';
 
 const recurrenceSchema = z.object({
@@ -50,16 +51,46 @@ export function cardRoutes(ctx: AppCtx) {
       return cards.updateCard(ctx, req.actor!, cardId, body);
     });
 
-    app.post('/:cardId/move', async (req) => {
+    /** What the move dialog needs before attempting: checklist + direction. */
+    app.get('/:cardId/move-requirements', async (req) => {
       const { cardId } = req.params as { cardId: string };
+      const { toColumnId } = z.object({ toColumnId: z.string().uuid() }).parse(req.query);
+      return policies.getMoveRequirements(ctx, req.actor!, cardId, toColumnId);
+    });
+
+    app.post('/:cardId/move', async (req) => {
       const body = z
         .object({
           toColumnId: z.string().uuid(),
           laneId: z.string().uuid().nullable().optional(),
           position: z.number().optional(),
+          /** full checklist state for this attempt — saved even if the move is refused */
+          acknowledgedPolicyIds: z.array(z.string().uuid()).max(100).optional(),
+          override: z
+            .object({
+              policies: z.boolean().optional(),
+              backwards: z.boolean().optional(),
+              reason: z.string().max(1000).optional(),
+            })
+            .optional(),
         })
         .parse(req.body);
-      return cards.moveCard(ctx, req.actor!, cardId, body.toColumnId, { laneId: body.laneId, position: body.position });
+      const { cardId } = req.params as { cardId: string };
+      return cards.moveCard(ctx, req.actor!, cardId, body.toColumnId, {
+        laneId: body.laneId,
+        position: body.position,
+        acknowledgedPolicyIds: body.acknowledgedPolicyIds,
+        override: body.override,
+      });
+    });
+
+    /** Save checklist ticks without moving — "I did some of it, come back later". */
+    app.post('/:cardId/move-progress', async (req) => {
+      const { cardId } = req.params as { cardId: string };
+      const body = z
+        .object({ toColumnId: z.string().uuid(), acknowledgedPolicyIds: z.array(z.string().uuid()).max(100) })
+        .parse(req.body);
+      return policies.saveMoveProgress(ctx, req.actor!, cardId, body.toColumnId, body.acknowledgedPolicyIds);
     });
 
     app.delete('/:cardId', async (req) => {

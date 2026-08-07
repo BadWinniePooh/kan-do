@@ -74,11 +74,44 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
     .where('is_overdue', '=', true)
     .executeTakeFirst();
 
+  // policy/backwards overrides: recorded, not just warned about, so a board can
+  // be asked how often its own rules get bypassed and by whom
+  const overrideRows = await ctx.db
+    .selectFrom('card_move_overrides')
+    .leftJoin('users', 'users.id', 'card_move_overrides.actor_id')
+    .select([
+      'card_move_overrides.id',
+      'card_move_overrides.card_id',
+      'card_move_overrides.backwards',
+      'card_move_overrides.skipped_policies',
+      'card_move_overrides.at',
+      'users.display_name as actor_name',
+    ])
+    .where('card_move_overrides.board_id', '=', boardId)
+    .orderBy('card_move_overrides.at', 'desc')
+    .limit(200)
+    .execute();
+  const skippedCount = (r: (typeof overrideRows)[number]) =>
+    Array.isArray(r.skipped_policies) ? r.skipped_policies.length : 0;
+
   return {
     columns,
     perCard,
     doneEvents: doneEvents.map((d) => ({ at: d.done_at })),
     overdueCount: Number(overdueCount?.n ?? 0),
+    overrides: {
+      total: overrideRows.length,
+      backwardsMoves: overrideRows.filter((r) => r.backwards).length,
+      policiesSkipped: overrideRows.reduce((sum, r) => sum + skippedCount(r), 0),
+      recent: overrideRows.slice(0, 20).map((r) => ({
+        id: r.id,
+        cardId: r.card_id,
+        at: r.at,
+        backwards: r.backwards,
+        actorName: r.actor_name,
+        skipped: Array.isArray(r.skipped_policies) ? (r.skipped_policies as { label: string; kind: string }[]) : [],
+      })),
+    },
     aggregates: {
       meanLeadTimeMs: meanMs(perCard.map((c) => c.leadTimeMs)),
       meanCycleTimeMs: meanMs(perCard.map((c) => c.cycleTimeMs)),

@@ -9,8 +9,10 @@ import { canEditCards } from '../domain/rbac.js';
 import * as rec from '../domain/recurrence.js';
 import type { RecurrenceRule } from '@kan-do/shared';
 import type { AppCtx } from './context.js';
-import { badRequest, forbidden, notFound } from './context.js';
+import { badRequest, conflict, forbidden, notFound } from './context.js';
 import { assertBoardAccess, firstLaneId } from './boards.js';
+import { blockedDetails, evaluateMove } from '../domain/moveGuard.js';
+import { checkedPolicyIds, movePolicies, saveProgress } from './policies.js';
 import { scheduleOverdueCheck, scheduleReopen } from '../jobs/queue.js';
 
 async function assertCardEdit(ctx: AppCtx, actor: Actor, cardId: string) {
@@ -135,7 +137,67 @@ export async function updateCard(ctx: AppCtx, actor: Actor, cardId: string, patc
 }
 
 /**
- * Move a card to another column (and/or lane/position). Recurrence hooks:
+ * Runs the policy + direction gates for a user-initiated move.
+ *
+ * Order matters: the checklist ticks are persisted BEFORE the decision, so a
+ * refused move still leaves the user's partial progress on the card. Throws 409
+ * with the checklist attached when the move must not proceed.
+ */
+async function guardMove(
+  ctx: AppCtx,
+  actor: Actor,
+  cardId: string,
+  fromCol: { id: string; position: number },
+  toCol: { id: string; position: number },
+  opts: MoveOptions,
+) {
+  const { leavePolicies, enterPolicies } = await movePolicies(ctx.db, fromCol.id, toCol.id);
+  const applicable = [...leavePolicies, ...enterPolicies];
+
+  if (fromCol.id !== toCol.id && applicable.length) {
+    await saveProgress(ctx.db, cardId, actor.userId, applicable, opts.acknowledgedPolicyIds ?? []);
+  }
+  const checkedIds = applicable.length ? await checkedPolicyIds(ctx.db, cardId) : [];
+
+  const result = evaluateMove({
+    fromColumn: fromCol,
+    toColumn: toCol,
+    leavePolicies,
+    enterPolicies,
+    checkedIds,
+    override: { policies: opts.override?.policies, backwards: opts.override?.backwards },
+  });
+
+  if (result.blocked) {
+    const why = result.unmet.length && result.backwards
+      ? 'move blocked: unmet column policies and backwards move'
+      : result.unmet.length
+        ? 'move blocked by unmet column policies'
+        : 'move blocked: cards cannot move backwards on this board';
+    throw conflict(why, blockedDetails(result, checkedIds.filter((id) => applicable.some((p) => p.id === id))));
+  }
+  return { ...result, applicable };
+}
+
+export interface MoveOptions {
+  laneId?: string | null;
+  position?: number;
+  /** complete checklist state for this attempt; persisted even if the move is refused */
+  acknowledgedPolicyIds?: string[];
+  /** deliberate bypasses — each one recorded in card_move_overrides */
+  override?: { policies?: boolean; backwards?: boolean; reason?: string };
+}
+
+/**
+ * Move a card to another column (and/or lane/position).
+ *
+ * Gated by the move guard (domain/moveGuard.ts): the source column's "before
+ * leaving" policies and the target column's "before entering" policies must all
+ * be ticked, and a card may not move to an earlier column. Both gates take an
+ * explicit override, which is audited. System moves (actor null) bypass the
+ * guard — the scheduler reopening a recurring card is not a user decision.
+ *
+ * Recurrence hooks:
  *  - into a done column  -> onClosed: schedule reopen
  *  - out of done to open -> onReopened (manual reopen): arm overdue deadline
  */
@@ -144,7 +206,7 @@ export async function moveCard(
   actor: Actor | null, // null = system (scheduler reopen)
   cardId: string,
   toColumnId: string,
-  opts: { laneId?: string | null; position?: number } = {},
+  opts: MoveOptions = {},
 ) {
   const db = ctx.db;
   const card = actor
@@ -152,10 +214,12 @@ export async function moveCard(
     : await db.selectFrom('cards').selectAll().where('id', '=', cardId).executeTakeFirstOrThrow();
 
   const [fromCol, toCol] = await Promise.all([
-    db.selectFrom('board_columns').select(['id', 'semantic']).where('id', '=', card.column_id).executeTakeFirstOrThrow(),
-    db.selectFrom('board_columns').select(['id', 'semantic', 'board_id']).where('id', '=', toColumnId).executeTakeFirst(),
+    db.selectFrom('board_columns').select(['id', 'semantic', 'position']).where('id', '=', card.column_id).executeTakeFirstOrThrow(),
+    db.selectFrom('board_columns').select(['id', 'semantic', 'board_id', 'position']).where('id', '=', toColumnId).executeTakeFirst(),
   ]);
   if (!toCol || toCol.board_id !== card.board_id) throw badRequest('target column does not belong to the card\'s board');
+
+  const guard = actor ? await guardMove(ctx, actor, card.id, fromCol, toCol, opts) : null;
 
   const now = new Date();
   const set: Record<string, unknown> = {
@@ -206,6 +270,34 @@ export async function moveCard(
       await trx
         .insertInto('card_transitions')
         .values({ card_id: cardId, from_column_id: fromCol.id, to_column_id: toColumnId, actor_id: actor?.userId ?? null, at: now })
+        .execute();
+    }
+    if (guard?.overrideUsed) {
+      // labels are copied in: the audit must stay readable after the policy or
+      // its column is deleted
+      await trx
+        .insertInto('card_move_overrides')
+        .values({
+          card_id: cardId,
+          board_id: card.board_id,
+          from_column_id: fromCol.id,
+          to_column_id: toColumnId,
+          actor_id: actor?.userId ?? null,
+          backwards: guard.backwards,
+          skipped_policies: JSON.stringify(
+            guard.skipped.map((p) => ({ policyId: p.id, kind: p.kind, label: p.label, columnId: p.columnId, columnName: p.columnName })),
+          ),
+          reason: opts.override?.reason?.trim() || null,
+          at: now,
+        })
+        .execute();
+    }
+    if (guard?.applicable.length) {
+      // the checklist belonged to THIS move; a later move re-asks from scratch
+      await trx
+        .deleteFrom('card_policy_progress')
+        .where('card_id', '=', cardId)
+        .where('policy_id', 'in', guard.applicable.map((p) => p.id))
         .execute();
     }
     return u;

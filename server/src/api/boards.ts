@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppCtx } from '../services/context.js';
 import * as boards from '../services/boards.js';
 import * as metrics from '../services/metrics.js';
+import * as policies from '../services/policies.js';
 import { requireAuth } from '../auth/plugin.js';
 
 const columnSchema = z.object({
@@ -10,6 +11,13 @@ const columnSchema = z.object({
   name: z.string().min(1).max(100),
   position: z.number().int(),
   semantic: z.enum(['open', 'done']).nullable(),
+});
+
+const policySchema = z.object({
+  id: z.string().uuid().optional(),
+  kind: z.enum(['enter', 'leave']),
+  label: z.string().min(1).max(300),
+  position: z.number().int(),
 });
 
 export function boardRoutes(ctx: AppCtx) {
@@ -70,6 +78,26 @@ export function boardRoutes(ctx: AppCtx) {
     app.get('/:boardId/metrics', async (req) => {
       const { boardId } = req.params as { boardId: string };
       return metrics.boardMetrics(ctx, req.actor!, boardId);
+    });
+
+    // ---- column policies: checklists gating card movement ----
+    app.get('/:boardId/policies', async (req) => {
+      const { boardId } = req.params as { boardId: string };
+      return policies.listBoardPolicies(ctx, req.actor!, boardId);
+    });
+
+    /** Replace-style, per column: create / rename / delete / reorder in one call. */
+    app.put('/:boardId/columns/:columnId/policies', async (req) => {
+      const { boardId, columnId } = req.params as { boardId: string; columnId: string };
+      const body = z.array(policySchema).max(50).parse(req.body);
+      return policies.saveColumnPolicies(ctx, req.actor!, boardId, columnId, body);
+    });
+
+    /** Override audit — every skipped policy and forced backwards move. */
+    app.get('/:boardId/policy-overrides', async (req) => {
+      const { boardId } = req.params as { boardId: string };
+      const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(500).default(200) }).parse(req.query);
+      return policies.listOverrides(ctx, req.actor!, boardId, limit);
     });
   };
 }

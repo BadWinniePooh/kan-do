@@ -3,6 +3,32 @@ export type Role = 'global_admin' | 'org_admin' | 'user';
 export type ColumnSemantic = 'open' | 'done' | null;
 
 /**
+ * Column policy checklists.
+ *  - 'leave': must be satisfied to move a card OUT of the column
+ *  - 'enter': must be satisfied to move a card INTO the column
+ */
+export type PolicyKind = 'enter' | 'leave';
+
+export interface PolicyRef {
+  id: string;
+  kind: PolicyKind;
+  label: string;
+  columnId: string;
+  columnName: string;
+}
+
+/** Payload of the 409 a blocked move returns, so the UI can show the checklist. */
+export interface MoveBlockedDetails {
+  backwards: boolean;
+  /** every policy that applies to this move (source 'leave' + target 'enter') */
+  applicable: PolicyRef[];
+  /** the subset still unticked */
+  unmet: PolicyRef[];
+  /** policy ids already ticked and persisted on the card */
+  checkedIds: string[];
+}
+
+/**
  * Plain-language recurrence rule built by the UI recurrence builder.
  * Serialized to an iCal RRULE string on the server (single source of truth
  * for scheduling math). Users never see RRULE syntax.

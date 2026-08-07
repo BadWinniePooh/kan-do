@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pivot, type CardFact } from './pivot.js';
+import { pivot, multiPivot, type CardFact } from './pivot.js';
 
 const HOUR = 3_600_000;
 
@@ -12,10 +12,12 @@ const fact = (over: Partial<CardFact>): CardFact => ({
   recurrenceStatus: 'open',
   createdMonth: '2026-07',
   closedMonth: 'Not done',
+  overrideStatus: 'clean',
   leadTimeMs: null,
   cycleTimeMs: null,
   waitingTimeMs: null,
   timeInColumnMs: null,
+  overrideCount: 0,
   ...over,
 });
 
@@ -106,5 +108,99 @@ describe('pivot', () => {
 
   it('rejects zero dimensions', () => {
     expect(() => pivot([fact({})], { dimensions: [], metric: 'count', aggregation: 'count' })).toThrow();
+  });
+});
+
+describe('multiPivot', () => {
+  const HOUR_ = 3_600_000;
+
+  it('plots several series on one shared axis', () => {
+    const res = multiPivot(
+      [
+        fact({ createdMonth: '2026-01', cycleTimeMs: 2 * HOUR_ }),
+        fact({ createdMonth: '2026-01', cycleTimeMs: 4 * HOUR_ }),
+        fact({ createdMonth: '2026-02', cycleTimeMs: 6 * HOUR_ }),
+      ],
+      {
+        dimension: 'createdMonth',
+        series: [
+          { label: 'Cards', metric: 'count', aggregation: 'count' },
+          { label: 'Mean cycle', metric: 'cycleTimeMs', aggregation: 'avg' },
+        ],
+      },
+    );
+    expect(res.keys).toEqual(['2026-01', '2026-02']);
+    expect(res.series[0]!.values).toEqual([2, 1]);
+    expect(res.series[1]!.values).toEqual([3 * HOUR_, 6 * HOUR_]);
+  });
+
+  it('burnup: scope and completed over their own dimensions, cumulative', () => {
+    const res = multiPivot(
+      [
+        fact({ createdMonth: '2026-01', closedMonth: '2026-01' }),
+        fact({ createdMonth: '2026-01', closedMonth: '2026-03' }),
+        fact({ createdMonth: '2026-02', closedMonth: 'Not done' }),
+        fact({ createdMonth: '2026-03', closedMonth: 'Not done' }),
+      ],
+      {
+        dimension: 'createdMonth',
+        omitKeys: ['Not done'],
+        series: [
+          { label: 'Scope', metric: 'count', aggregation: 'count', dimension: 'createdMonth', cumulative: true },
+          { label: 'Completed', metric: 'count', aggregation: 'count', dimension: 'closedMonth', cumulative: true },
+        ],
+      },
+    );
+    expect(res.keys).toEqual(['2026-01', '2026-02', '2026-03']);
+    expect(res.series[0]!.values).toEqual([2, 3, 4]); // scope only ever grows
+    expect(res.series[1]!.values).toEqual([1, 1, 2]); // completed trails it
+  });
+
+  it('a bucket a series never saw is 0 for counts and null for durations', () => {
+    const res = multiPivot([fact({ createdMonth: '2026-01', closedMonth: '2026-02', leadTimeMs: HOUR_ })], {
+      dimension: 'createdMonth',
+      series: [
+        { label: 'Closed', metric: 'count', aggregation: 'count', dimension: 'closedMonth' },
+        { label: 'Lead', metric: 'leadTimeMs', aggregation: 'avg', dimension: 'createdMonth' },
+      ],
+    });
+    expect(res.keys).toEqual(['2026-01', '2026-02']);
+    expect(res.series[0]!.values).toEqual([0, 1]);
+    expect(res.series[1]!.values).toEqual([HOUR_, null]);
+  });
+
+  it('omitKeys drops the bucket from the axis entirely', () => {
+    const res = multiPivot([fact({ closedMonth: 'Not done' }), fact({ closedMonth: '2026-05' })], {
+      dimension: 'closedMonth',
+      omitKeys: ['Not done'],
+      series: [{ label: 'Done', metric: 'count', aggregation: 'count' }],
+    });
+    expect(res.keys).toEqual(['2026-05']);
+    expect(res.series[0]!.values).toEqual([1]);
+  });
+
+  it('cumulative carries the running total across empty buckets', () => {
+    const res = multiPivot([fact({ createdMonth: '2026-01' }), fact({ createdMonth: '2026-03' })], {
+      dimension: 'createdMonth',
+      series: [
+        { label: 'All', metric: 'count', aggregation: 'count', dimension: 'createdMonth', cumulative: true },
+        { label: 'Closed', metric: 'count', aggregation: 'count', dimension: 'closedMonth', cumulative: true },
+      ],
+    });
+    // the closedMonth series contributes a 'Not done' bucket to the axis here
+    expect(res.keys).toEqual(['2026-01', '2026-03', 'Not done']);
+    expect(res.series[0]!.values).toEqual([1, 2, 2]);
+  });
+
+  it('overrideCount is aggregatable like any other metric', () => {
+    const res = multiPivot([fact({ column: 'Doing', overrideCount: 2 }), fact({ column: 'Doing', overrideCount: 1 })], {
+      dimension: 'column',
+      series: [{ label: 'Overrides', metric: 'overrideCount', aggregation: 'sum' }],
+    });
+    expect(res.series[0]!.values).toEqual([3]);
+  });
+
+  it('rejects an empty series list', () => {
+    expect(() => multiPivot([fact({})], { dimension: 'column', series: [] })).toThrow();
   });
 });

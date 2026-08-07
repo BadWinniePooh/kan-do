@@ -1,4 +1,6 @@
-import type { RecurrenceRule, RecurrenceStatus, Role } from '@kan-do/shared';
+import type { RecurrenceRule, RecurrenceStatus, Role, PolicyKind, PolicyRef, MoveBlockedDetails } from '@kan-do/shared';
+
+export type { PolicyKind, PolicyRef, MoveBlockedDetails };
 
 export interface Me {
   id: string;
@@ -37,6 +39,24 @@ export interface Category {
   color: string;
 }
 
+/** A checklist item gating movement into ('enter') or out of ('leave') a column. */
+export interface ColumnPolicy {
+  id: string;
+  column_id: string;
+  kind: PolicyKind;
+  label: string;
+  position: number;
+}
+
+/** What the move dialog renders before a move is attempted. */
+export interface MoveRequirements {
+  backwards: boolean;
+  applicable: PolicyRef[];
+  checkedIds: string[];
+  fromColumn: { id: string; name: string; position: number } | null;
+  toColumn: { id: string; name: string; position: number };
+}
+
 export interface Card {
   id: string;
   board_id: string;
@@ -73,6 +93,7 @@ export interface BoardDetail {
   cards: Card[];
   owners: (OwnerRow & { card_id: string })[];
   categories: Category[];
+  policies: ColumnPolicy[];
 }
 
 export interface Note {

@@ -14,12 +14,13 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { get, post } from '../api';
-import type { BoardDetail, Card, OwnerRow } from '../types';
+import type { BoardDetail, Card, ColumnPolicy, MoveRequirements, OwnerRow } from '../types';
 import { useBoardRealtime } from '../realtime';
 import CardTile from '../components/CardTile';
 import CardModal from '../components/CardModal';
 import ColumnEditor from '../components/ColumnEditor';
 import BoardSettings from '../components/BoardSettings';
+import MovePolicyDialog from '../components/MovePolicyDialog';
 import { BoardSkeleton } from '../components/Loading';
 import { useDismiss } from '../useDismiss';
 
@@ -42,6 +43,7 @@ export default function BoardPage() {
   const [boardSettings, setBoardSettings] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [newCardCol, setNewCardCol] = useState<string | null>(null);
+  const [gatedMove, setGatedMove] = useState<{ card: Card; laneId: string | null; requirements: MoveRequirements } | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -59,6 +61,16 @@ export default function BoardPage() {
     return m;
   }, [data?.owners]);
 
+  const policiesByColumn = useMemo(() => {
+    const m = new Map<string, ColumnPolicy[]>();
+    for (const p of data?.policies ?? []) {
+      const list = m.get(p.column_id) ?? [];
+      list.push(p);
+      m.set(p.column_id, list);
+    }
+    return m;
+  }, [data?.policies]);
+
   const move = useMutation({
     mutationFn: (v: { cardId: string; toColumnId: string; laneId: string | null }) =>
       post(`/api/cards/${v.cardId}/move`, { toColumnId: v.toColumnId, laneId: v.laneId, position: Date.now() }),
@@ -66,13 +78,32 @@ export default function BoardPage() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['board', boardId] }),
   });
 
-  const onDragEnd = (e: DragEndEvent) => {
+  const onDragEnd = async (e: DragEndEvent) => {
     setDragging(null);
     const card = e.active.data.current?.card as Card | undefined;
     const target = e.over?.data.current as { columnId: string; laneId: string | null } | undefined;
     if (!card || !target) return;
     if (card.column_id === target.columnId && card.lane_id === target.laneId) return;
     setMoveError(null);
+
+    // A column change may be gated by policies or the no-backwards rule. Ask
+    // first so the checklist is presented up front rather than after a refusal;
+    // a same-column reorder and an ungated move skip straight through.
+    if (card.column_id !== target.columnId) {
+      let requirements: MoveRequirements;
+      try {
+        requirements = await get<MoveRequirements>(
+          `/api/cards/${card.id}/move-requirements?toColumnId=${target.columnId}`,
+        );
+      } catch (err) {
+        setMoveError(`Move failed: ${err instanceof Error ? err.message : 'unknown error'}. The board is unchanged.`);
+        return;
+      }
+      if (requirements.backwards || requirements.applicable.length > 0) {
+        setGatedMove({ card, laneId: target.laneId, requirements });
+        return;
+      }
+    }
 
     // optimistic: card appears in the target instantly; server confirms or we roll back
     qc.setQueryData<BoardDetailWithCovers>(['board', boardId], (old) =>
@@ -118,7 +149,7 @@ export default function BoardPage() {
       <DndContext
         sensors={sensors}
         onDragStart={(e: DragStartEvent) => setDragging((e.active.data.current?.card as Card) ?? null)}
-        onDragEnd={onDragEnd}
+        onDragEnd={(e) => void onDragEnd(e)}
         onDragCancel={() => setDragging(null)}
       >
         <div className="space-y-6">
@@ -135,6 +166,20 @@ export default function BoardPage() {
                           {col.semantic}
                         </span>
                       )}
+                      {(() => {
+                        const ps = policiesByColumn.get(col.id) ?? [];
+                        if (ps.length === 0) return null;
+                        const enter = ps.filter((p) => p.kind === 'enter').length;
+                        const leave = ps.length - enter;
+                        return (
+                          <span
+                            className="text-xs text-amber-800 border border-amber-300 bg-amber-50 rounded px-1"
+                            title={`${enter} policy check(s) before entering, ${leave} before leaving`}
+                          >
+                            ☑ {ps.length}
+                          </span>
+                        );
+                      })()}
                       <button
                         aria-label={`Add card to ${col.name}`}
                         onClick={() => setNewCardCol(col.id)}
@@ -183,6 +228,23 @@ export default function BoardPage() {
           )}
         </DragOverlay>
       </DndContext>
+
+      {gatedMove && (
+        <MovePolicyDialog
+          cardId={gatedMove.card.id}
+          cardTitle={gatedMove.card.title}
+          laneId={gatedMove.laneId}
+          requirements={gatedMove.requirements}
+          onClose={() => {
+            setGatedMove(null);
+            void qc.invalidateQueries({ queryKey: ['board', boardId] });
+          }}
+          onMoved={() => {
+            setGatedMove(null);
+            void qc.invalidateQueries({ queryKey: ['board', boardId] });
+          }}
+        />
+      )}
 
       {openCard && <CardModal cardId={openCard} board={data} onClose={() => setOpenCard(null)} />}
       {editColumns && <ColumnEditor board={data} onClose={() => setEditColumns(false)} />}

@@ -2,23 +2,31 @@
  * Assembles CardFact rows for the pivot engine — strictly from boards the
  * requesting user can access. A requested boardIds filter is INTERSECTED with
  * the accessible set, so foreign ids simply contribute nothing.
+ *
+ * Both the single-series and the multi-series entry points share this one fact
+ * collector, so a chart can never widen its own data access by asking for more
+ * series.
  */
 import type { ColumnSemantic } from '@kan-do/shared';
 import type { Actor } from '../domain/rbac.js';
 import { computeCardMetrics } from '../domain/metrics.js';
-import { pivot, type CardFact, type PivotQuery, type PivotRow } from '../domain/pivot.js';
+import {
+  pivot,
+  multiPivot,
+  type CardFact,
+  type PivotQuery,
+  type PivotRow,
+  type MultiPivotQuery,
+  type MultiPivotResult,
+} from '../domain/pivot.js';
 import type { AppCtx } from './context.js';
 import { listBoards } from './boards.js';
 
 const month = (d: Date) => d.toISOString().slice(0, 7);
 
-export async function runPivotQuery(
-  ctx: AppCtx,
-  actor: Actor,
-  query: PivotQuery & { boardIds?: string[] },
-): Promise<{ rows: PivotRow[]; boardCount: number }> {
+async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Promise<{ facts: CardFact[]; boardCount: number }> {
   const accessible = await listBoards(ctx, actor);
-  const boards = query.boardIds?.length ? accessible.filter((b) => query.boardIds!.includes(b.id)) : accessible;
+  const boards = boardIds?.length ? accessible.filter((b) => boardIds.includes(b.id)) : accessible;
 
   const facts: CardFact[] = [];
   const now = new Date();
@@ -53,6 +61,16 @@ export async function runPivotQuery(
       ownersByCard.set(o.card_id, list);
     }
 
+    // policy/backwards overrides make it into the pivot so "how often do we
+    // bypass our own rules" is answerable from the widget builder
+    const overrides = await ctx.db
+      .selectFrom('card_move_overrides')
+      .select(({ fn }) => ['card_id', fn.countAll().as('n')])
+      .where('board_id', '=', board.id)
+      .groupBy('card_id')
+      .execute();
+    const overridesByCard = new Map(overrides.map((o) => [o.card_id, Number(o.n)]));
+
     for (const card of cards) {
       const transitions = await ctx.db
         .selectFrom('card_transitions')
@@ -79,6 +97,8 @@ export async function runPivotQuery(
         }
       }
 
+      const overrideCount = overridesByCard.get(card.id) ?? 0;
+
       facts.push({
         board: board.name,
         column: colName.get(card.column_id) ?? 'Unknown',
@@ -88,13 +108,33 @@ export async function runPivotQuery(
         recurrenceStatus: card.recurrence_rule ? card.recurrence_status : 'not recurring',
         createdMonth: month(new Date(card.created_at)),
         closedMonth,
+        overrideStatus: overrideCount > 0 ? 'overridden' : 'clean',
         leadTimeMs: m.leadTimeMs,
         cycleTimeMs: m.cycleTimeMs,
         waitingTimeMs: m.waitingTimeMs,
         timeInColumnMs: m.perColumnMs[card.column_id] ?? null,
+        overrideCount,
       });
     }
   }
 
-  return { rows: pivot(facts, query), boardCount: boards.length };
+  return { facts, boardCount: boards.length };
+}
+
+export async function runPivotQuery(
+  ctx: AppCtx,
+  actor: Actor,
+  query: PivotQuery & { boardIds?: string[] },
+): Promise<{ rows: PivotRow[]; boardCount: number }> {
+  const { facts, boardCount } = await collectFacts(ctx, actor, query.boardIds);
+  return { rows: pivot(facts, query), boardCount };
+}
+
+export async function runMultiPivotQuery(
+  ctx: AppCtx,
+  actor: Actor,
+  query: MultiPivotQuery & { boardIds?: string[] },
+): Promise<MultiPivotResult & { boardCount: number }> {
+  const { facts, boardCount } = await collectFacts(ctx, actor, query.boardIds);
+  return { ...multiPivot(facts, query), boardCount };
 }

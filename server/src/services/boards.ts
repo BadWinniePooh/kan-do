@@ -57,7 +57,7 @@ export async function createBoard(ctx: AppCtx, actor: Actor, name: string) {
 export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string) {
   await assertBoardAccess(ctx.db, actor, boardId, 'view');
   const orgIdRow = await ctx.db.selectFrom('boards').select('org_id').where('id', '=', boardId).executeTakeFirstOrThrow();
-  const [board, columns, lanes, members, cards, categories] = await Promise.all([
+  const [board, columns, lanes, members, cards, categories, policies] = await Promise.all([
     ctx.db.selectFrom('boards').selectAll().where('id', '=', boardId).executeTakeFirstOrThrow(),
     ctx.db.selectFrom('board_columns').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
     ctx.db.selectFrom('lanes').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
@@ -69,6 +69,15 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
       .execute(),
     ctx.db.selectFrom('cards').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
     ctx.db.selectFrom('categories').selectAll().where('org_id', '=', orgIdRow.org_id).orderBy('name').execute(),
+    // shipped with the board so the UI knows which columns gate movement
+    // without a second round-trip per column
+    ctx.db
+      .selectFrom('column_policies')
+      .innerJoin('board_columns', 'board_columns.id', 'column_policies.column_id')
+      .select(['column_policies.id', 'column_policies.column_id', 'column_policies.kind', 'column_policies.label', 'column_policies.position'])
+      .where('board_columns.board_id', '=', boardId)
+      .orderBy('column_policies.position')
+      .execute(),
   ]);
   const cardIds = cards.map((c) => c.id);
   const owners = cardIds.length
@@ -112,7 +121,7 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
       if (key) covers[c.id] = await ctx.storage.presignDownload(key);
     }
   }
-  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers, categories };
+  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers, categories, policies };
 }
 
 export async function updateBoard(ctx: AppCtx, actor: Actor, boardId: string, patch: { name?: string }) {

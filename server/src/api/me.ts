@@ -4,8 +4,18 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { AppCtx } from '../services/context.js';
 import { requireAuth } from '../auth/plugin.js';
-import { runPivotQuery } from '../services/pivotQuery.js';
+import { runPivotQuery, runMultiPivotQuery } from '../services/pivotQuery.js';
 import { DIMENSIONS, METRICS, AGGREGATIONS } from '../domain/pivot.js';
+
+/** One plotted series of a multi-series widget (e.g. a burnup's "scope"). */
+const seriesSchema = z.object({
+  label: z.string().min(1).max(100),
+  metric: z.enum(METRICS),
+  aggregation: z.enum(AGGREGATIONS),
+  /** plot this series over its own dimension instead of the shared axis */
+  dimension: z.enum(DIMENSIONS).optional(),
+  cumulative: z.boolean().optional(),
+});
 
 export function meRoutes(ctx: AppCtx) {
   return async (app: FastifyInstance) => {
@@ -167,7 +177,17 @@ export function meRoutes(ctx: AppCtx) {
           layout: z.array(
             z.object({
               id: z.string(),
-              widget: z.enum(['lead', 'cycle', 'waiting', 'doneAge', 'perColumn', 'overdueCount', 'throughput', 'custom']),
+              widget: z.enum([
+                'lead',
+                'cycle',
+                'waiting',
+                'doneAge',
+                'perColumn',
+                'overdueCount',
+                'throughput',
+                'policyOverrides',
+                'custom',
+              ]),
               w: z.number().int().min(1).max(12),
               h: z.number().int().min(1).max(12),
               /** custom pivot widget definition */
@@ -177,7 +197,11 @@ export function meRoutes(ctx: AppCtx) {
                   dimensions: z.array(z.enum(DIMENSIONS)).min(1).max(2),
                   metric: z.enum(METRICS),
                   aggregation: z.enum(AGGREGATIONS),
-                  viz: z.enum(['table', 'bar', 'line', 'pie']),
+                  viz: z.enum(['table', 'bar', 'line', 'area', 'pie']),
+                  /** present => multi-series widget; the axis is dimensions[0] */
+                  series: z.array(seriesSchema).min(1).max(6).optional(),
+                  /** axis buckets to drop, e.g. 'Not done' on a month axis */
+                  omitKeys: z.array(z.string().max(100)).max(20).optional(),
                 })
                 .optional(),
             }),
@@ -205,16 +229,34 @@ export function meRoutes(ctx: AppCtx) {
         .executeTakeFirstOrThrow();
     });
 
-    // ---- custom widget pivot query (tenancy enforced in runPivotQuery) ----
+    // ---- custom widget pivot query (tenancy enforced in the query services;
+    // the live preview in the builder hits this same route, so a preview can
+    // never show data the saved widget could not) ----
     app.post('/dashboard/query', async (req) => {
+      const boardIds = z.array(z.string().uuid()).max(50).optional();
+      const raw = (req.body ?? {}) as Record<string, unknown>;
+
+      // multi-series: several metrics on one shared axis (burnup and friends)
+      if (Array.isArray(raw.series) && raw.series.length > 0) {
+        const body = z
+          .object({
+            dimension: z.enum(DIMENSIONS),
+            series: z.array(seriesSchema).min(1).max(6),
+            omitKeys: z.array(z.string().max(100)).max(20).optional(),
+            boardIds,
+          })
+          .parse(raw);
+        return runMultiPivotQuery(ctx, req.actor!, body);
+      }
+
       const body = z
         .object({
           dimensions: z.array(z.enum(DIMENSIONS)).min(1).max(2),
           metric: z.enum(METRICS),
           aggregation: z.enum(AGGREGATIONS),
-          boardIds: z.array(z.string().uuid()).max(50).optional(),
+          boardIds,
         })
-        .parse(req.body);
+        .parse(raw);
       return runPivotQuery(ctx, req.actor!, body);
     });
 

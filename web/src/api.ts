@@ -5,6 +5,8 @@ export class ApiError extends Error {
     public status: number,
     message: string,
     public fields?: { path: string; message: string }[],
+    /** machine-readable payload, e.g. the checklist behind a blocked card move */
+    public details?: unknown,
   ) {
     super(message);
   }
@@ -21,14 +23,16 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
   if (!res.ok) {
     let msg = res.statusText;
     let fields;
+    let details;
     try {
       const body = await res.json();
       msg = body.error ?? msg;
       fields = body.fields;
+      details = body.details;
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, msg, fields);
+    throw new ApiError(res.status, msg, fields, details);
   }
   return res.json() as Promise<T>;
 }

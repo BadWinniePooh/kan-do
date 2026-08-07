@@ -50,6 +50,11 @@ web/ (React SPA)  ──HTTP/WS──▶  server/src/api        (routes: validat
 - `notifications`, `notification_settings` (event × channel toggles),
   `push_tokens`, `notification_ledger` (dedupe keys → at-most-once sends),
   `dashboard_configs` (per user, per board or org-wide widget layout).
+- `column_policies` ─ per-column checklists gating movement (`kind ∈ {enter,
+  leave}`, ordered by `position`); `card_policy_progress` holds a card's partial
+  ticks between move attempts; `card_move_overrides` is the append-only audit of
+  every deliberate bypass (skipped policies denormalised as JSON so the record
+  outlives the policy).
 - `idp_configs` ─ per-org OIDC/SAML settings.
 
 ## Recurrence lifecycle (spec state machine)
@@ -83,6 +88,28 @@ ledger's unique dedupe key makes each event notify at most once.
 Computed on read in `domain/metrics.ts` (pure), aggregated per board. Dashboard
 widgets (stat tiles, per-column bar, weekly throughput) are user-configurable
 (selection, order, width) and persisted per user+board.
+
+Custom widgets are pivot-table style: dimensions × metric × aggregation, built
+in `domain/pivot.ts`. `multiPivot` additionally plots several series on one
+shared axis, each with its own dimension and an optional running total — that is
+what expresses a burnup (cumulative scope by `createdMonth` against cumulative
+completed by `closedMonth`). Both entry points go through the same fact
+collector in `services/pivotQuery.ts`, which only ever reads boards the caller
+can access; the builder's live preview calls that same endpoint, so a preview
+can never reveal more than the saved widget would.
+
+## Card movement policies
+
+A move from column A to column B must satisfy A's `leave` policies and B's
+`enter` policies, and may not go backwards through the board's column order.
+Decisions are pure (`domain/moveGuard.ts`); `services/cards.ts` loads the
+policies, persists the submitted ticks **before** deciding (so a refused attempt
+never loses partial progress), and refuses with `409` carrying the checklist.
+Each gate takes a separate explicit override; whenever one actually lets
+something through, a `card_move_overrides` row is written inside the same
+transaction as the move. System moves (scheduler reopen, `actor = null`) bypass
+the guard. Overrides surface in board metrics, a per-board audit endpoint, and
+the pivot engine (`overrideStatus` dimension, `overrideCount` metric).
 
 ## Real-time
 

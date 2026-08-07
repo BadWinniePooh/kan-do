@@ -36,7 +36,7 @@ export async function buildApp(ctx: AppCtx): Promise<FastifyInstance> {
       });
     }
     if (err instanceof HttpError) {
-      return reply.code(err.statusCode).send({ error: err.message });
+      return reply.code(err.statusCode).send({ error: err.message, ...(err.details === undefined ? {} : { details: err.details }) });
     }
     // Postgres unique violation -> clean conflict instead of a blank 500
     if ((err as { code?: string }).code === '23505') {

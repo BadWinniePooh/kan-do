@@ -1,5 +1,13 @@
 import type { ColumnType, Generated } from 'kysely';
-import type { RecurrenceRule, RecurrenceStatus, Role, ColumnSemantic, NotificationChannel, NotificationEvent } from '@kan-do/shared';
+import type {
+  RecurrenceRule,
+  RecurrenceStatus,
+  Role,
+  ColumnSemantic,
+  NotificationChannel,
+  NotificationEvent,
+  PolicyKind,
+} from '@kan-do/shared';
 
 type Created = ColumnType<Date, Date | string | undefined, never>;
 type Updated = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -60,6 +68,38 @@ export interface BoardColumnsTable {
   semantic: Exclude<ColumnSemantic, null> | null;
   created_at: Created;
   updated_at: Updated;
+}
+
+export interface ColumnPoliciesTable {
+  id: Generated<string>;
+  column_id: string;
+  kind: PolicyKind;
+  label: string;
+  position: Generated<number>;
+  created_at: Created;
+  updated_at: Updated;
+}
+
+/** Partial checklist state parked on the card between move attempts. */
+export interface CardPolicyProgressTable {
+  card_id: string;
+  policy_id: string;
+  checked_at: Created;
+  checked_by: string | null;
+}
+
+/** Audit row written whenever a move bypasses policies and/or column order. */
+export interface CardMoveOverridesTable {
+  id: Generated<string>;
+  card_id: string;
+  board_id: string;
+  from_column_id: string | null;
+  to_column_id: string | null;
+  actor_id: string | null;
+  backwards: Generated<boolean>;
+  skipped_policies: unknown;
+  reason: string | null;
+  at: Created;
 }
 
 export interface LanesTable {
@@ -195,6 +235,9 @@ export interface DB {
   boards: BoardsTable;
   board_members: BoardMembersTable;
   board_columns: BoardColumnsTable;
+  column_policies: ColumnPoliciesTable;
+  card_policy_progress: CardPolicyProgressTable;
+  card_move_overrides: CardMoveOverridesTable;
   lanes: LanesTable;
   external_owners: ExternalOwnersTable;
   cards: CardsTable;

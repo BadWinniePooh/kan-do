@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   BarChart,
@@ -10,6 +10,9 @@ import {
   CartesianGrid,
   LineChart,
   Line,
+  AreaChart,
+  Area,
+  Legend,
   PieChart,
   Pie,
   Cell,
@@ -31,19 +34,60 @@ const C = {
   surface: '#fcfcfb',
 };
 
-type WidgetId = 'lead' | 'cycle' | 'waiting' | 'doneAge' | 'perColumn' | 'overdueCount' | 'throughput' | 'custom';
+type WidgetId =
+  | 'lead'
+  | 'cycle'
+  | 'waiting'
+  | 'doneAge'
+  | 'perColumn'
+  | 'overdueCount'
+  | 'throughput'
+  | 'policyOverrides'
+  | 'custom';
 
-const DIMENSIONS = ['board', 'column', 'lane', 'category', 'owner', 'recurrenceStatus', 'createdMonth', 'closedMonth'] as const;
-const METRICS = ['count', 'leadTimeMs', 'cycleTimeMs', 'waitingTimeMs', 'timeInColumnMs'] as const;
+const DIMENSIONS = [
+  'board',
+  'column',
+  'lane',
+  'category',
+  'owner',
+  'recurrenceStatus',
+  'createdMonth',
+  'closedMonth',
+  'overrideStatus',
+] as const;
+const METRICS = ['count', 'leadTimeMs', 'cycleTimeMs', 'waitingTimeMs', 'timeInColumnMs', 'overrideCount'] as const;
 const AGGREGATIONS = ['count', 'sum', 'avg', 'min', 'max', 'median'] as const;
+
+type Dimension = (typeof DIMENSIONS)[number];
+type Metric = (typeof METRICS)[number];
+type Aggregation = (typeof AGGREGATIONS)[number];
+type Viz = 'table' | 'bar' | 'line' | 'area' | 'pie';
+
+/** One line/bar/area on a multi-series widget. */
+interface SeriesDef {
+  label: string;
+  metric: Metric;
+  aggregation: Aggregation;
+  /** plot this series over its own dimension instead of the shared axis */
+  dimension?: Dimension;
+  /** running total along the axis — this is what makes a burnup a burnup */
+  cumulative?: boolean;
+}
 
 interface CustomDef {
   title: string;
-  dimensions: (typeof DIMENSIONS)[number][];
-  metric: (typeof METRICS)[number];
-  aggregation: (typeof AGGREGATIONS)[number];
-  viz: 'table' | 'bar' | 'line' | 'pie';
+  dimensions: Dimension[];
+  metric: Metric;
+  aggregation: Aggregation;
+  viz: Viz;
+  /** present and non-empty => multi-series; dimensions[0] is the shared axis */
+  series?: SeriesDef[];
+  /** axis buckets to drop, e.g. 'Not done' on a month axis */
+  omitKeys?: string[];
 }
+
+const isMulti = (def: CustomDef) => Boolean(def.series?.length);
 
 interface LayoutItem {
   id: string;
@@ -58,6 +102,12 @@ interface Metrics {
   perCard: { cardId: string; title: string; leadTimeMs: number | null; cycleTimeMs: number | null; waitingTimeMs: number | null }[];
   doneEvents: { at: string }[];
   overdueCount: number;
+  overrides: {
+    total: number;
+    backwardsMoves: number;
+    policiesSkipped: number;
+    recent: { id: string; cardId: string; at: string; backwards: boolean; actorName: string | null; skipped: { label: string; kind: string }[] }[];
+  };
   aggregates: {
     meanLeadTimeMs: number | null;
     meanCycleTimeMs: number | null;
@@ -75,6 +125,7 @@ const BUILTIN_WIDGETS: { id: Exclude<WidgetId, 'custom'>; label: string }[] = [
   { id: 'overdueCount', label: 'Overdue cards' },
   { id: 'perColumn', label: 'Time in work columns' },
   { id: 'throughput', label: 'Throughput (done/week)' },
+  { id: 'policyOverrides', label: 'Policy overrides' },
 ];
 
 const DEFAULT_LAYOUT: LayoutItem[] = [
@@ -94,6 +145,7 @@ const DIM_LABELS: Record<string, string> = {
   recurrenceStatus: 'Recurrence status',
   createdMonth: 'Created (month)',
   closedMonth: 'Closed (month)',
+  overrideStatus: 'Policy override status',
 };
 const METRIC_LABELS: Record<string, string> = {
   count: 'Card count',
@@ -101,6 +153,18 @@ const METRIC_LABELS: Record<string, string> = {
   cycleTimeMs: 'Cycle time',
   waitingTimeMs: 'Waiting time',
   timeInColumnMs: 'Time in current column',
+  overrideCount: 'Policy overrides',
+};
+
+/** A burnup needs two differently-dimensioned cumulative counts — preset it. */
+const BURNUP_PRESET: Pick<CustomDef, 'dimensions' | 'viz' | 'series' | 'omitKeys'> = {
+  dimensions: ['createdMonth'],
+  viz: 'line',
+  omitKeys: ['Not done'],
+  series: [
+    { label: 'Scope', metric: 'count', aggregation: 'count', dimension: 'createdMonth', cumulative: true },
+    { label: 'Completed', metric: 'count', aggregation: 'count', dimension: 'closedMonth', cumulative: true },
+  ],
 };
 
 function fmtDuration(ms: number | null): string {
@@ -112,7 +176,7 @@ function fmtDuration(ms: number | null): string {
 }
 
 const fmtValue = (metric: string, v: number | null) =>
-  v === null ? '—' : metric === 'count' ? String(Math.round(v)) : fmtDuration(v);
+  v === null ? '—' : metric === 'count' || metric === 'overrideCount' ? String(Math.round(v)) : fmtDuration(v);
 
 export default function DashboardPage() {
   const qc = useQueryClient();
@@ -189,6 +253,7 @@ export default function DashboardPage() {
       {builderOpen && (
         <WidgetBuilder
           initial={builderOpen === 'new' ? null : builderOpen}
+          boardId={activeBoard}
           onClose={() => setBuilderOpen(null)}
           onSave={(def, existing) => {
             const next = existing
@@ -314,13 +379,31 @@ function WidgetConfig({
   );
 }
 
-/** Pivot-style builder: dimensions x metric x aggregation, viz independent. */
+/** Debounce so the live preview follows typing without one request per keystroke. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [held, setHeld] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setHeld(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return held;
+}
+
+/**
+ * Pivot-style builder: dimensions x metric(s) x aggregation, viz independent.
+ *
+ * Everything is previewed live against the user's real data while it is being
+ * configured — the preview hits the same access-scoped query endpoint the saved
+ * widget will, so it can never show more than the widget itself would.
+ */
 function WidgetBuilder({
   initial,
+  boardId,
   onClose,
   onSave,
 }: {
   initial: LayoutItem | null;
+  boardId: string;
   onClose: () => void;
   onSave: (def: CustomDef, existing: LayoutItem | null) => void;
 }) {
@@ -330,6 +413,21 @@ function WidgetBuilder({
   );
   const set = (p: Partial<CustomDef>) => setDef({ ...def, ...p });
   const countMode = def.metric === 'count';
+  const multi = isMulti(def);
+  // preview trails the form by a beat so dragging a select doesn't fire a
+  // request per intermediate value; the title is not part of the query
+  const previewDef = useDebounced(def, 350);
+
+  const setSeries = (next: SeriesDef[]) => set({ series: next });
+  const enableMulti = () =>
+    set({
+      viz: def.viz === 'pie' || def.viz === 'table' ? 'line' : def.viz,
+      dimensions: [def.dimensions[0]!],
+      series: [
+        { label: METRIC_LABELS[def.metric] ?? 'Series 1', metric: def.metric, aggregation: def.aggregation },
+        { label: 'Card count', metric: 'count', aggregation: 'count' },
+      ],
+    });
 
   return (
     <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center pt-10 px-4" onClick={onClose}>
@@ -338,7 +436,7 @@ function WidgetBuilder({
         role="dialog"
         aria-modal="true"
         aria-label="Custom widget builder"
-        className="bg-white rounded-xl shadow-xl w-full max-w-md p-5 space-y-3"
+        className="bg-white rounded-xl shadow-xl w-full max-w-3xl p-5 space-y-3 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-bold">{initial ? 'Edit widget' : 'New custom widget'}</h2>
@@ -353,10 +451,10 @@ function WidgetBuilder({
         </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="block text-sm">
-            Group by
+            {multi ? 'Axis (group by)' : 'Group by'}
             <select
               value={def.dimensions[0]}
-              onChange={(e) => set({ dimensions: [e.target.value as CustomDef['dimensions'][0], ...(def.dimensions[1] ? [def.dimensions[1]] : [])] })}
+              onChange={(e) => set({ dimensions: [e.target.value as Dimension, ...(def.dimensions[1] ? [def.dimensions[1]!] : [])] })}
               className="mt-1 w-full border rounded px-2 py-1"
             >
               {DIMENSIONS.map((d) => (
@@ -366,84 +464,146 @@ function WidgetBuilder({
               ))}
             </select>
           </label>
-          <label className="block text-sm">
-            Then by (optional)
-            <select
-              value={def.dimensions[1] ?? ''}
-              onChange={(e) =>
-                set({ dimensions: e.target.value ? [def.dimensions[0]!, e.target.value as CustomDef['dimensions'][0]] : [def.dimensions[0]!] })
-              }
-              className="mt-1 w-full border rounded px-2 py-1"
-            >
-              <option value="">—</option>
-              {DIMENSIONS.filter((d) => d !== def.dimensions[0]).map((d) => (
-                <option key={d} value={d}>
-                  {DIM_LABELS[d]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="block text-sm">
-            Metric
-            <select
-              value={def.metric}
-              onChange={(e) => {
-                const metric = e.target.value as CustomDef['metric'];
-                set({ metric, aggregation: metric === 'count' ? 'count' : def.aggregation === 'count' ? 'avg' : def.aggregation });
-              }}
-              className="mt-1 w-full border rounded px-2 py-1"
-            >
-              {METRICS.map((m) => (
-                <option key={m} value={m}>
-                  {METRIC_LABELS[m]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="block text-sm">
-            Aggregation
-            <select
-              value={def.aggregation}
-              disabled={countMode}
-              onChange={(e) => set({ aggregation: e.target.value as CustomDef['aggregation'] })}
-              className="mt-1 w-full border rounded px-2 py-1 disabled:opacity-50"
-              title={countMode ? 'Card count is always a count' : undefined}
-            >
-              {AGGREGATIONS.filter((a) => a !== 'count').map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-              {countMode && <option value="count">count</option>}
-            </select>
-          </label>
+          {!multi && (
+            <label className="block text-sm">
+              Then by (optional)
+              <select
+                value={def.dimensions[1] ?? ''}
+                onChange={(e) => set({ dimensions: e.target.value ? [def.dimensions[0]!, e.target.value as Dimension] : [def.dimensions[0]!] })}
+                className="mt-1 w-full border rounded px-2 py-1"
+              >
+                <option value="">—</option>
+                {DIMENSIONS.filter((d) => d !== def.dimensions[0]).map((d) => (
+                  <option key={d} value={d}>
+                    {DIM_LABELS[d]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {!multi && (
+            <>
+              <label className="block text-sm">
+                Metric
+                <select
+                  value={def.metric}
+                  onChange={(e) => {
+                    const metric = e.target.value as Metric;
+                    set({ metric, aggregation: metric === 'count' ? 'count' : def.aggregation === 'count' ? 'avg' : def.aggregation });
+                  }}
+                  className="mt-1 w-full border rounded px-2 py-1"
+                >
+                  {METRICS.map((m) => (
+                    <option key={m} value={m}>
+                      {METRIC_LABELS[m]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
+                Aggregation
+                <select
+                  value={def.aggregation}
+                  disabled={countMode}
+                  onChange={(e) => set({ aggregation: e.target.value as Aggregation })}
+                  className="mt-1 w-full border rounded px-2 py-1 disabled:opacity-50"
+                  title={countMode ? 'Card count is always a count' : undefined}
+                >
+                  {AGGREGATIONS.filter((a) => a !== 'count').map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                  {countMode && <option value="count">count</option>}
+                </select>
+              </label>
+            </>
+          )}
         </div>
-        <fieldset className="text-sm">
-          <legend className="mb-1">Show as</legend>
-          <div className="flex gap-2" role="radiogroup" aria-label="Visualization">
-            {(['table', 'bar', 'line', 'pie'] as const).map((v) => (
+
+        <fieldset className="text-sm border-t pt-3">
+          <legend className="sr-only">Series</legend>
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="font-medium">Series</span>
+            <div className="flex gap-2" role="radiogroup" aria-label="Number of series">
               <button
-                key={v}
                 type="button"
                 role="radio"
-                aria-checked={def.viz === v}
-                onClick={() => set({ viz: v })}
-                className={`border rounded px-3 py-1 ${def.viz === v ? 'bg-slate-800 text-white' : 'bg-white'}`}
+                aria-checked={!multi}
+                onClick={() => set({ series: undefined, omitKeys: undefined })}
+                className={`border rounded px-3 py-1 ${!multi ? 'bg-slate-800 text-white' : 'bg-white'}`}
               >
-                {v === 'table' ? '▦ table' : v === 'bar' ? '▮ bar' : v === 'line' ? '⟋ line' : '◔ pie'}
+                one
               </button>
-            ))}
+              <button
+                type="button"
+                role="radio"
+                aria-checked={multi}
+                onClick={() => (multi ? undefined : enableMulti())}
+                className={`border rounded px-3 py-1 ${multi ? 'bg-slate-800 text-white' : 'bg-white'}`}
+              >
+                several on one chart
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => set({ ...BURNUP_PRESET, title: def.title || 'Burnup' })}
+              className="ml-auto text-xs border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100"
+              title="Cumulative scope vs cumulative completed, over months"
+            >
+              ↗ Burnup preset
+            </button>
           </div>
-          {def.viz !== 'table' && def.dimensions.length === 2 && (
+          {multi && (
+            <SeriesEditor
+              series={def.series!}
+              axis={def.dimensions[0]!}
+              omitKeys={def.omitKeys ?? []}
+              onChange={setSeries}
+              onOmitKeys={(keys) => set({ omitKeys: keys.length ? keys : undefined })}
+            />
+          )}
+        </fieldset>
+
+        <fieldset className="text-sm">
+          <legend className="mb-1">Show as</legend>
+          <div className="flex gap-2 flex-wrap" role="radiogroup" aria-label="Visualization">
+            {(['table', 'bar', 'line', 'area', 'pie'] as const).map((v) => {
+              const disabled = multi && v === 'pie';
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  role="radio"
+                  aria-checked={def.viz === v}
+                  disabled={disabled}
+                  title={disabled ? 'A pie chart can only show one series' : undefined}
+                  onClick={() => set({ viz: v })}
+                  className={`border rounded px-3 py-1 disabled:opacity-40 ${def.viz === v ? 'bg-slate-800 text-white' : 'bg-white'}`}
+                >
+                  {v === 'table' ? '▦ table' : v === 'bar' ? '▮ bar' : v === 'line' ? '⟋ line' : v === 'area' ? '◣ area' : '◔ pie'}
+                </button>
+              );
+            })}
+          </div>
+          {!multi && def.viz !== 'table' && def.dimensions.length === 2 && (
             <p className="text-xs text-gray-500 mt-1">Charts use the first dimension; the second shows in the table view only.</p>
           )}
         </fieldset>
+
+        <div className="border-t pt-3">
+          <p className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color: C.inkSecondary }}>
+            Live preview — your real data
+          </p>
+          <CustomWidget def={{ ...previewDef, title: def.title.trim() || 'Untitled widget' }} boardId={boardId} />
+        </div>
+
         <div className="flex gap-2 justify-end pt-1">
           <button onClick={onClose} className="border rounded px-3 py-1 text-sm">
             Cancel
           </button>
           <button
-            disabled={!def.title.trim()}
+            disabled={!def.title.trim() || (multi && def.series!.some((s) => !s.label.trim()))}
             title={!def.title.trim() ? 'Give the widget a title first' : undefined}
             onClick={() => onSave({ ...def, title: def.title.trim() }, initial)}
             className="bg-slate-800 text-white rounded px-3 py-1 text-sm disabled:opacity-50"
@@ -456,19 +616,179 @@ function WidgetBuilder({
   );
 }
 
+/** Add / remove / reorder the metrics plotted together on one chart. */
+function SeriesEditor({
+  series,
+  axis,
+  omitKeys,
+  onChange,
+  onOmitKeys,
+}: {
+  series: SeriesDef[];
+  axis: Dimension;
+  omitKeys: string[];
+  onChange: (next: SeriesDef[]) => void;
+  onOmitKeys: (keys: string[]) => void;
+}) {
+  const patch = (i: number, p: Partial<SeriesDef>) => onChange(series.map((s, j) => (j === i ? { ...s, ...p } : s)));
+  const swap = (i: number, j: number) => {
+    if (j < 0 || j >= series.length) return;
+    const next = [...series];
+    [next[i], next[j]] = [next[j]!, next[i]!];
+    onChange(next);
+  };
+
+  return (
+    <div className="mt-2 space-y-2">
+      {series.map((s, i) => (
+        <div key={i} className="border rounded p-2 grid grid-cols-12 gap-2 items-end">
+          <span aria-hidden className="col-span-1 w-3 h-3 rounded-sm self-center" style={{ background: SERIES[i % SERIES.length] }} />
+          <label className="col-span-4 text-xs">
+            Name
+            <input
+              value={s.label}
+              onChange={(e) => patch(i, { label: e.target.value })}
+              className="mt-0.5 w-full border rounded px-2 py-1 text-sm"
+            />
+          </label>
+          <label className="col-span-3 text-xs">
+            Metric
+            <select
+              value={s.metric}
+              onChange={(e) => {
+                const metric = e.target.value as Metric;
+                patch(i, { metric, aggregation: metric === 'count' ? 'count' : s.aggregation === 'count' ? 'avg' : s.aggregation });
+              }}
+              className="mt-0.5 w-full border rounded px-1 py-1 text-sm"
+            >
+              {METRICS.map((m) => (
+                <option key={m} value={m}>
+                  {METRIC_LABELS[m]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="col-span-2 text-xs">
+            Aggregation
+            <select
+              value={s.aggregation}
+              disabled={s.metric === 'count'}
+              onChange={(e) => patch(i, { aggregation: e.target.value as Aggregation })}
+              className="mt-0.5 w-full border rounded px-1 py-1 text-sm disabled:opacity-50"
+            >
+              {AGGREGATIONS.filter((a) => a !== 'count').map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+              {s.metric === 'count' && <option value="count">count</option>}
+            </select>
+          </label>
+          <div className="col-span-2 flex gap-1 justify-end pb-1">
+            <button aria-label={`Move ${s.label} up`} disabled={i === 0} onClick={() => swap(i, i - 1)} className="disabled:opacity-30">
+              ↑
+            </button>
+            <button
+              aria-label={`Move ${s.label} down`}
+              disabled={i === series.length - 1}
+              onClick={() => swap(i, i + 1)}
+              className="disabled:opacity-30"
+            >
+              ↓
+            </button>
+            <button
+              aria-label={`Remove ${s.label}`}
+              disabled={series.length <= 1}
+              onClick={() => onChange(series.filter((_, j) => j !== i))}
+              className="text-red-600 disabled:opacity-30"
+            >
+              🗑
+            </button>
+          </div>
+          <label className="col-span-6 text-xs">
+            Plot over
+            <select
+              value={s.dimension ?? ''}
+              onChange={(e) => patch(i, { dimension: (e.target.value || undefined) as Dimension | undefined })}
+              className="mt-0.5 w-full border rounded px-1 py-1 text-sm"
+              title="A series can use its own dimension — that is how scope and completed share one time axis"
+            >
+              <option value="">same as axis ({DIM_LABELS[axis]})</option>
+              {DIMENSIONS.map((d) => (
+                <option key={d} value={d}>
+                  {DIM_LABELS[d]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="col-span-6 flex items-center gap-2 text-xs pb-1">
+            <input type="checkbox" checked={Boolean(s.cumulative)} onChange={(e) => patch(i, { cumulative: e.target.checked })} />
+            Running total along the axis
+          </label>
+        </div>
+      ))}
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          type="button"
+          disabled={series.length >= 6}
+          onClick={() => onChange([...series, { label: `Series ${series.length + 1}`, metric: 'count', aggregation: 'count' }])}
+          className="text-xs border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100 disabled:opacity-40"
+        >
+          + Add series
+        </button>
+        <label className="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={omitKeys.includes('Not done')}
+            onChange={(e) => onOmitKeys(e.target.checked ? [...new Set([...omitKeys, 'Not done'])] : omitKeys.filter((k) => k !== 'Not done'))}
+          />
+          Drop the &ldquo;Not done&rdquo; bucket from the axis
+        </label>
+      </div>
+    </div>
+  );
+}
+
+interface PivotResponse {
+  rows: { keys: string[]; value: number | null; n: number }[];
+}
+interface MultiPivotResponse {
+  keys: string[];
+  series: { label: string; metric: Metric; values: (number | null)[]; ns: number[] }[];
+}
+
+/** Durations plot in hours; counts plot raw. */
+const toPlot = (metric: Metric, v: number | null) =>
+  v === null ? null : metric === 'count' || metric === 'overrideCount' ? v : +(v / 3_600_000).toFixed(1);
+const unitOf = (metric: Metric) => (metric === 'count' || metric === 'overrideCount' ? '' : ' h');
+
+function subtitleOf(def: CustomDef): string {
+  if (isMulti(def)) {
+    const names = def.series!.map((s) => s.label).join(' · ');
+    return `${names} — over ${DIM_LABELS[def.dimensions[0]!]}`;
+  }
+  return `${METRIC_LABELS[def.metric]} · ${def.aggregation} · by ${def.dimensions.map((d) => DIM_LABELS[d]).join(' and ')}`;
+}
+
+/**
+ * Renders a custom widget from its definition. Used both on the dashboard and
+ * as the builder's live preview, so what is previewed is exactly what is saved.
+ */
 function CustomWidget({ def, boardId }: { def: CustomDef; boardId: string }) {
-  const { data, error } = useQuery<{ rows: { keys: string[]; value: number | null; n: number }[] }>({
-    queryKey: ['pivot', boardId, def],
+  const multi = isMulti(def);
+  const { data, error } = useQuery<PivotResponse | MultiPivotResponse>({
+    // title deliberately excluded: renaming a widget must not refetch it
+    queryKey: ['pivot', boardId, def.dimensions, def.metric, def.aggregation, def.series ?? null, def.omitKeys ?? null],
     queryFn: () =>
-      post('/api/me/dashboard/query', {
-        dimensions: def.dimensions,
-        metric: def.metric,
-        aggregation: def.aggregation,
-        boardIds: [boardId],
-      }),
+      post(
+        '/api/me/dashboard/query',
+        multi
+          ? { dimension: def.dimensions[0], series: def.series, omitKeys: def.omitKeys, boardIds: [boardId] }
+          : { dimensions: def.dimensions, metric: def.metric, aggregation: def.aggregation, boardIds: [boardId] },
+      ),
   });
 
-  const sub = `${METRIC_LABELS[def.metric]} · ${def.aggregation} · by ${def.dimensions.map((d) => DIM_LABELS[d]).join(' and ')}`;
+  const sub = subtitleOf(def);
 
   if (error)
     return (
@@ -483,17 +803,24 @@ function CustomWidget({ def, boardId }: { def: CustomDef; boardId: string }) {
       </ChartCard>
     );
 
-  const rows = data.rows;
+  return multi ? (
+    <MultiSeriesView def={def} data={data as MultiPivotResponse} subtitle={sub} />
+  ) : (
+    <SingleSeriesView def={def} rows={(data as PivotResponse).rows} subtitle={sub} />
+  );
+}
+
+function SingleSeriesView({ def, rows, subtitle }: { def: CustomDef; rows: PivotResponse['rows']; subtitle: string }) {
   if (rows.length === 0)
     return (
-      <ChartCard title={def.title} subtitle={sub}>
+      <ChartCard title={def.title} subtitle={subtitle}>
         <p className="text-sm text-gray-500 py-6 text-center">No data yet.</p>
       </ChartCard>
     );
 
   if (def.viz === 'table' || def.dimensions.length === 2) {
     return (
-      <ChartCard title={def.title} subtitle={sub}>
+      <ChartCard title={def.title} subtitle={subtitle}>
         <div className="overflow-x-auto max-h-64">
           <table className="w-full text-sm">
             <thead>
@@ -524,15 +851,12 @@ function CustomWidget({ def, boardId }: { def: CustomDef; boardId: string }) {
     );
   }
 
-  const chartData = rows.map((r) => ({
-    name: r.keys[0]!,
-    value: def.metric === 'count' ? (r.value ?? 0) : +(((r.value ?? 0) / 3_600_000).toFixed(1)),
-  }));
-  const unit = def.metric === 'count' ? '' : ' h';
+  const chartData = rows.map((r) => ({ name: r.keys[0]!, value: toPlot(def.metric, r.value) ?? 0 }));
+  const unit = unitOf(def.metric);
   const tooltipFmt = (v: number) => [`${v}${unit}`, METRIC_LABELS[def.metric]];
 
   return (
-    <ChartCard title={def.title} subtitle={`${sub}${unit ? ' (hours)' : ''}`}>
+    <ChartCard title={def.title} subtitle={`${subtitle}${unit ? ' (hours)' : ''}`}>
       <ResponsiveContainer width="100%" height={220}>
         {def.viz === 'bar' ? (
           <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -550,6 +874,14 @@ function CustomWidget({ def, boardId }: { def: CustomDef; boardId: string }) {
             <Tooltip formatter={tooltipFmt} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
             <Line type="monotone" dataKey="value" stroke={C.series1} strokeWidth={2} dot={{ r: 4, fill: C.series1 }} />
           </LineChart>
+        ) : def.viz === 'area' ? (
+          <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            <CartesianGrid stroke={C.grid} vertical={false} />
+            <XAxis dataKey="name" tick={{ fill: C.muted, fontSize: 12 }} axisLine={{ stroke: C.grid }} tickLine={false} />
+            <YAxis tick={{ fill: C.muted, fontSize: 12 }} axisLine={false} tickLine={false} width={36} />
+            <Tooltip formatter={tooltipFmt} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+            <Area type="monotone" dataKey="value" stroke={C.series1} fill={C.series1} fillOpacity={0.18} strokeWidth={2} />
+          </AreaChart>
         ) : (
           <PieChart>
             <Pie data={chartData.slice(0, 8)} dataKey="value" nameKey="name" outerRadius={80} label={(e) => e.name}>
@@ -566,6 +898,135 @@ function CustomWidget({ def, boardId }: { def: CustomDef; boardId: string }) {
           Showing the first 8 groups — switch to table for the full list.
         </p>
       )}
+    </ChartCard>
+  );
+}
+
+/** Several metrics on one axis: burnup, scope-vs-done, count-vs-duration. */
+function MultiSeriesView({ def, data, subtitle }: { def: CustomDef; data: MultiPivotResponse; subtitle: string }) {
+  const { keys, series } = data;
+  if (keys.length === 0 || series.length === 0)
+    return (
+      <ChartCard title={def.title} subtitle={subtitle}>
+        <p className="text-sm text-gray-500 py-6 text-center">No data yet.</p>
+      </ChartCard>
+    );
+
+  const units = new Set(series.map((s) => unitOf(s.metric)));
+  const mixedUnits = units.size > 1;
+  const note = mixedUnits ? ' — mixed units on one axis (durations in hours)' : units.has(' h') ? ' (hours)' : '';
+
+  // recharts wants row-per-axis-point: { name, s0, s1, ... }
+  const chartData = keys.map((name, i) => {
+    const row: Record<string, string | number | null> = { name };
+    series.forEach((s, si) => {
+      row[`s${si}`] = toPlot(s.metric, s.values[i] ?? null);
+    });
+    return row;
+  });
+  const color = (i: number) => SERIES[i % SERIES.length]!;
+  const tooltipFmt = (v: number, name: string) => {
+    const idx = series.findIndex((s) => s.label === name);
+    return [`${v}${idx >= 0 ? unitOf(series[idx]!.metric) : ''}`, name];
+  };
+
+  if (def.viz === 'table') {
+    return (
+      <ChartCard title={def.title} subtitle={subtitle}>
+        <div className="overflow-x-auto max-h-64">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b text-left" style={{ color: C.inkSecondary }}>
+                <th className="py-1 pr-3">{DIM_LABELS[def.dimensions[0]!]}</th>
+                {series.map((s) => (
+                  <th key={s.label} className="py-1 text-right pl-3">
+                    {s.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {keys.map((k, i) => (
+                <tr key={k} className="border-b last:border-0">
+                  <td className="py-1 pr-3">{k}</td>
+                  {series.map((s) => (
+                    <td key={s.label} className="py-1 text-right tabular-nums pl-3">
+                      {fmtValue(s.metric, s.values[i] ?? null)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </ChartCard>
+    );
+  }
+
+  // recharts inspects its direct children to discover axes/legend, so these are
+  // written out per chart rather than shared through a fragment
+  const grid = <CartesianGrid stroke={C.grid} vertical={false} />;
+  const xAxis = <XAxis dataKey="name" tick={{ fill: C.muted, fontSize: 12 }} axisLine={{ stroke: C.grid }} tickLine={false} />;
+  const yAxis = <YAxis tick={{ fill: C.muted, fontSize: 12 }} axisLine={false} tickLine={false} width={40} />;
+  const tip = <Tooltip formatter={tooltipFmt} contentStyle={{ fontSize: 12, borderRadius: 8 }} />;
+  const legend = <Legend wrapperStyle={{ fontSize: 12 }} />;
+
+  return (
+    <ChartCard title={def.title} subtitle={`${subtitle}${note}`}>
+      <ResponsiveContainer width="100%" height={240}>
+        {def.viz === 'bar' ? (
+          <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            {grid}
+            {xAxis}
+            {yAxis}
+            {tip}
+            {legend}
+            {series.map((s, i) => (
+              <Bar key={s.label} dataKey={`s${i}`} name={s.label} fill={color(i)} radius={[4, 4, 0, 0]} maxBarSize={28} />
+            ))}
+          </BarChart>
+        ) : def.viz === 'area' ? (
+          <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            {grid}
+            {xAxis}
+            {yAxis}
+            {tip}
+            {legend}
+            {series.map((s, i) => (
+              <Area
+                key={s.label}
+                type="monotone"
+                dataKey={`s${i}`}
+                name={s.label}
+                stroke={color(i)}
+                fill={color(i)}
+                fillOpacity={0.15}
+                strokeWidth={2}
+              />
+            ))}
+          </AreaChart>
+        ) : (
+          <LineChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            {grid}
+            {xAxis}
+            {yAxis}
+            {tip}
+            {legend}
+            {series.map((s, i) => (
+              <Line
+                key={s.label}
+                type="monotone"
+                dataKey={`s${i}`}
+                name={s.label}
+                stroke={color(i)}
+                strokeWidth={2}
+                dot={{ r: 3, fill: color(i) }}
+                connectNulls
+              />
+            ))}
+          </LineChart>
+        )}
+      </ResponsiveContainer>
     </ChartCard>
   );
 }
@@ -648,6 +1109,23 @@ function Widget({
             </ResponsiveContainer>
           )}
         </ChartCard>
+      );
+    }
+    case 'policyOverrides': {
+      // deliberate rule bypasses are recorded, not just warned about — this is
+      // the board-level readout of how often that happens
+      const o = metrics.overrides ?? { total: 0, backwardsMoves: 0, policiesSkipped: 0, recent: [] };
+      return (
+        <StatTile
+          label="Policy overrides"
+          value={String(o.total)}
+          sub={
+            o.total === 0
+              ? 'no rules have been bypassed'
+              : `${o.policiesSkipped} policy check(s) skipped · ${o.backwardsMoves} forced backwards move(s)`
+          }
+          accent={o.total > 0 ? C.critical : undefined}
+        />
       );
     }
     case 'throughput':

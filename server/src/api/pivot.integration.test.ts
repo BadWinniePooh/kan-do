@@ -114,6 +114,59 @@ describe.skipIf(!hasDb)('pivot query', () => {
     expect(res.json().boardCount).toBe(0);
   });
 
+  it('multi-series burnup: two cumulative counts on one month axis', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/me/dashboard/query',
+      headers: { cookie: alice },
+      payload: {
+        dimension: 'createdMonth',
+        omitKeys: ['Not done'],
+        boardIds: [aliceBoard],
+        series: [
+          { label: 'Scope', metric: 'count', aggregation: 'count', dimension: 'createdMonth', cumulative: true },
+          { label: 'Completed', metric: 'count', aggregation: 'count', dimension: 'closedMonth', cumulative: true },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { keys: string[]; series: { label: string; values: number[] }[] };
+    expect(body.series.map((s) => s.label)).toEqual(['Scope', 'Completed']);
+    expect(body.keys.length).toBeGreaterThan(0);
+    // three cards created this month, one of them finished
+    expect(body.series[0]!.values.at(-1)).toBe(3);
+    expect(body.series[1]!.values.at(-1)).toBe(1);
+  });
+
+  it("TENANCY: bob's multi-series query over alice's board returns nothing", async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/me/dashboard/query',
+      headers: { cookie: bob },
+      payload: {
+        dimension: 'createdMonth',
+        boardIds: [aliceBoard],
+        series: [{ label: 'Scope', metric: 'count', aggregation: 'count' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().keys).toEqual([]);
+    expect(res.json().boardCount).toBe(0);
+  });
+
+  it('invalid series metric rejected with validation detail', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/me/dashboard/query',
+      headers: { cookie: alice },
+      payload: {
+        dimension: 'createdMonth',
+        series: [{ label: 'x', metric: 'password_hash', aggregation: 'count' }],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('invalid dimension rejected with validation detail', async () => {
     const res = await app.inject({
       method: 'POST',
