@@ -41,6 +41,33 @@ test('global admin creates an org and a user', async ({ page, request }) => {
   }
 });
 
+test('global admin creates an ORG ADMIN via UI; org admin sees admin nav', async ({ page }) => {
+  const adminEmail = `orgadmin-${Date.now()}@test.io`;
+
+  await page.goto('/');
+  await page.getByLabel('Email').fill(ADMIN_EMAIL);
+  await page.getByLabel('Password').fill(ADMIN_PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('heading', { name: 'Organizations' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Manage users' }).first().click();
+  const form = page.locator('form[aria-label="Create user in organization"]');
+  await form.getByLabel('Email').fill(adminEmail);
+  await form.getByLabel('Display name').fill('E2E OrgAdmin');
+  await form.getByLabel('Initial password (min 8)').fill('e2epassword1');
+  await form.getByLabel('Role').selectOption('org_admin');
+  await form.getByRole('button', { name: 'Create user' }).click();
+  await expect(page.getByRole('cell', { name: adminEmail })).toBeVisible();
+
+  // the freshly created org admin can log in and gets the Org Admin UI
+  await page.getByRole('button', { name: 'Log out' }).click();
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible(); // full reload lands on login
+  await page.getByLabel('Email').fill(adminEmail);
+  await page.getByLabel('Password').fill('e2epassword1');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('link', { name: 'Org Admin' })).toBeVisible();
+});
+
 test('user logs in, creates board, adds and opens a card', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Email').fill(USER_EMAIL);

@@ -1,5 +1,5 @@
-import { Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Routes, Route, Navigate, Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { get, post } from './api';
 import type { Me } from './types';
 import LoginPage from './pages/LoginPage';
@@ -57,12 +57,10 @@ export default function App() {
 }
 
 function Shell({ me, nav, children }: { me: Me; nav: { to: string; label: string }[]; children: React.ReactNode }) {
-  const qc = useQueryClient();
-  const navigate = useNavigate();
   const logout = async () => {
     await post('/api/auth/logout');
-    qc.clear();
-    navigate('/');
+    // hard reload: guarantees every cache and socket is dropped with the session
+    window.location.assign('/');
   };
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col">

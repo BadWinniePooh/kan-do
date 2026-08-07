@@ -38,6 +38,10 @@ export async function buildApp(ctx: AppCtx): Promise<FastifyInstance> {
     if (err instanceof HttpError) {
       return reply.code(err.statusCode).send({ error: err.message });
     }
+    // Postgres unique violation -> clean conflict instead of a blank 500
+    if ((err as { code?: string }).code === '23505') {
+      return reply.code(409).send({ error: 'already exists' });
+    }
     req.log.error({ err, userId: req.actor?.userId, url: req.url }, 'unhandled error');
     return reply.code(500).send({ error: 'internal error' });
   });

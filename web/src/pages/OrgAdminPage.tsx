@@ -42,7 +42,8 @@ export default function OrgAdminPage({ me }: { me: Me }) {
   };
 
   const invite = useMutation({
-    mutationFn: (v: { email: string; displayName: string; password: string }) => post(`/api/orgs/${orgId}/users`, v),
+    mutationFn: (v: { email: string; displayName: string; password: string; role: string }) =>
+      post(`/api/orgs/${orgId}/users`, v),
     onSuccess: () => {
       setFieldErrors({});
       setError(null);
@@ -50,6 +51,17 @@ export default function OrgAdminPage({ me }: { me: Me }) {
     },
     onError,
   });
+
+  const resetPassword = (u: OrgUser) => {
+    const pw = window.prompt(`New password for ${u.display_name} (min 8 characters):`);
+    if (pw === null) return;
+    patch(`/api/orgs/${orgId}/users/${u.id}`, { password: pw })
+      .then(() => {
+        setError(null);
+        refresh();
+      })
+      .catch(onError);
+  };
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-8">
@@ -67,6 +79,7 @@ export default function OrgAdminPage({ me }: { me: Me }) {
               email: String(f.get('email')),
               displayName: String(f.get('displayName')),
               password: String(f.get('password')),
+              role: String(f.get('role')),
             });
           }}
         >
@@ -93,6 +106,15 @@ export default function OrgAdminPage({ me }: { me: Me }) {
             {fieldErrors.password && (
               <p role="alert" className="text-xs text-red-700">{fieldErrors.password}</p>
             )}
+          </div>
+          <div>
+            <label htmlFor="inv-role" className="text-xs font-medium">
+              Role
+            </label>
+            <select id="inv-role" name="role" className="border rounded px-2 py-1 w-full text-sm">
+              <option value="user">User</option>
+              <option value="org_admin">Org admin</option>
+            </select>
           </div>
           <button type="submit" className="bg-slate-800 text-white rounded px-3 self-end py-1.5 text-sm">
             Invite user
@@ -130,7 +152,7 @@ export default function OrgAdminPage({ me }: { me: Me }) {
                     </select>
                   </td>
                   <td className="p-3">{u.active ? 'active' : <span className="text-red-700">deactivated</span>}</td>
-                  <td className="p-3">
+                  <td className="p-3 flex gap-3">
                     {u.id !== me.id && (
                       <button
                         className="text-xs underline"
@@ -139,6 +161,9 @@ export default function OrgAdminPage({ me }: { me: Me }) {
                         {u.active ? 'Deactivate' : 'Reactivate'}
                       </button>
                     )}
+                    <button className="text-xs underline" onClick={() => resetPassword(u)}>
+                      Reset password
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -171,7 +196,87 @@ export default function OrgAdminPage({ me }: { me: Me }) {
         </ul>
         <IdpForm orgId={orgId} onSaved={refresh} />
       </section>
+
+      <ExternalOwnersSection orgId={orgId} />
     </div>
+  );
+}
+
+interface ExternalOwner {
+  id: string;
+  display_name: string;
+}
+
+/** Org-wide directory of non-account owners (external dependencies). */
+function ExternalOwnersSection({ orgId }: { orgId: string }) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const { data: externals = [] } = useQuery<ExternalOwner[]>({
+    queryKey: ['org-external-owners'],
+    queryFn: () => get(`/api/orgs/${orgId}/external-owners`),
+  });
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['org-external-owners'] });
+    void qc.invalidateQueries({ queryKey: ['external-owners'] });
+  };
+  return (
+    <section aria-label="External owners">
+      <h2 className="text-xl font-bold mb-3">External owners</h2>
+      <p className="text-sm text-gray-500 mb-2">
+        People or teams without an account, assignable as card owners to model external dependencies.
+      </p>
+      {error && (
+        <p role="alert" className="text-sm text-red-700 mb-2">⚠ {error}</p>
+      )}
+      <ul className="space-y-2 mb-3">
+        {externals.map((x) => (
+          <li key={x.id} className="bg-white border rounded-lg p-3 flex items-center gap-3 text-sm">
+            <span className="rounded-md bg-amber-100 text-amber-900 border-2 border-dashed border-amber-500 px-1.5 py-0.5 text-xs font-semibold">
+              external
+            </span>
+            <span className="font-medium">{x.display_name}</span>
+            <button
+              className="ml-auto text-xs text-red-700 underline"
+              onClick={() =>
+                del(`/api/orgs/${orgId}/external-owners/${x.id}`)
+                  .then(() => {
+                    setError(null);
+                    refresh();
+                  })
+                  .catch((e) => setError(e instanceof Error ? e.message : 'delete failed'))
+              }
+            >
+              remove
+            </button>
+          </li>
+        ))}
+        {externals.length === 0 && <p className="text-sm text-gray-500">None yet.</p>}
+      </ul>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const f = new FormData(e.currentTarget);
+          const name = String(f.get('name')).trim();
+          if (!name) return;
+          post(`/api/orgs/${orgId}/external-owners`, { displayName: name })
+            .then(() => {
+              setError(null);
+              refresh();
+            })
+            .catch((err) => setError(err instanceof Error ? err.message : 'create failed'));
+          (e.target as HTMLFormElement).reset();
+        }}
+      >
+        <label htmlFor="ext-name" className="sr-only">
+          External owner name
+        </label>
+        <input id="ext-name" name="name" required placeholder="Name (e.g. Vendor X)" className="border rounded px-2 py-1 text-sm" />
+        <button type="submit" className="bg-slate-800 text-white rounded px-3 py-1 text-sm">
+          Add
+        </button>
+      </form>
+    </section>
   );
 }
 

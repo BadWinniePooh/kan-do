@@ -114,9 +114,50 @@ export default function CardModal({ cardId, board, onClose }: { cardId: string; 
           <Gallery data={data} cardId={cardId} onChanged={invalidate} />
 
           <Notes cardId={cardId} notes={data.notes} onChanged={invalidate} />
+
+          <DeleteCard cardId={cardId} title={card.title} onDeleted={() => {
+            invalidate();
+            onClose();
+          }} />
         </div>
       </div>
     </Overlay>
+  );
+}
+
+function DeleteCard({ cardId, title, onDeleted }: { cardId: string; title: string; onDeleted: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <section aria-label="Delete card" className="border-t pt-3">
+      {!confirming ? (
+        <button className="text-sm text-red-700 underline" onClick={() => setConfirming(true)}>
+          Delete this card…
+        </button>
+      ) : (
+        <div className="text-sm space-y-2">
+          <p className="text-red-700 font-medium">⚠ Deletes "{title}" with its notes and pictures. Cannot be undone.</p>
+          {error && (
+            <p role="alert" className="text-red-700">⚠ {error}</p>
+          )}
+          <div className="flex gap-2">
+            <button
+              className="bg-red-700 text-white rounded px-3 py-1"
+              onClick={() =>
+                del(`/api/cards/${cardId}`)
+                  .then(onDeleted)
+                  .catch((e) => setError(e instanceof Error ? e.message : 'delete failed'))
+              }
+            >
+              Delete card
+            </button>
+            <button className="border rounded px-3 py-1" onClick={() => setConfirming(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

@@ -19,6 +19,7 @@ import { useBoardRealtime } from '../realtime';
 import CardTile from '../components/CardTile';
 import CardModal from '../components/CardModal';
 import ColumnEditor from '../components/ColumnEditor';
+import BoardSettings from '../components/BoardSettings';
 
 type BoardDetailWithCovers = BoardDetail & { covers: Record<string, string> };
 
@@ -36,6 +37,7 @@ export default function BoardPage() {
   const [openCard, setOpenCard] = useState<string | null>(null);
   const [dragging, setDragging] = useState<Card | null>(null);
   const [editColumns, setEditColumns] = useState(false);
+  const [boardSettings, setBoardSettings] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [newCardCol, setNewCardCol] = useState<string | null>(null);
 
@@ -95,6 +97,9 @@ export default function BoardPage() {
         <h1 className="text-xl font-bold">{data.board.name}</h1>
         <button onClick={() => setEditColumns(true)} className="text-sm border rounded px-2 py-1 bg-white hover:bg-gray-50">
           ⚙ Columns & lanes
+        </button>
+        <button onClick={() => setBoardSettings(true)} className="text-sm border rounded px-2 py-1 bg-white hover:bg-gray-50">
+          👥 Board settings
         </button>
       </div>
       {moveError && (
@@ -173,6 +178,7 @@ export default function BoardPage() {
 
       {openCard && <CardModal cardId={openCard} board={data} onClose={() => setOpenCard(null)} />}
       {editColumns && <ColumnEditor board={data} onClose={() => setEditColumns(false)} />}
+      {boardSettings && <BoardSettings board={data} onClose={() => setBoardSettings(false)} />}
     </div>
   );
 }

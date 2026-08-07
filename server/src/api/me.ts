@@ -77,6 +77,19 @@ export function meRoutes(ctx: AppCtx) {
         .executeTakeFirstOrThrow();
     });
 
+    // ---- org user directory: light list for board-member picking (no roles,
+    // no admin data) — scoped to the caller's own org ----
+    app.get('/org-users', async (req, reply) => {
+      if (!req.actor!.orgId) return reply.code(400).send({ error: 'not in an organization' });
+      return ctx.db
+        .selectFrom('users')
+        .select(['id', 'display_name', 'email'])
+        .where('org_id', '=', req.actor!.orgId)
+        .where('active', '=', true)
+        .orderBy('display_name')
+        .execute();
+    });
+
     // ---- external owners: readable/creatable by any org user so cards can
     // model external dependencies without admin round-trips ----
     app.get('/external-owners', async (req, reply) => {
