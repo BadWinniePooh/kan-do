@@ -1,0 +1,94 @@
+# Kan-Do self-hosted stack: web + api + worker + postgres + minio
+# Copy .env.example to .env and adjust before `docker compose up -d`.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kando}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kando}
+      POSTGRES_DB: ${POSTGRES_DB:-kando}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - '9000:9000' # S3 API — must be reachable by browsers for presigned URLs
+      - '9001:9001' # console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    image: ${IMAGE_SERVER:-ghcr.io/badwinniepooh/kan-do-server:latest}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment: &app-env
+      NODE_ENV: production
+      PORT: '3001'
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      WEB_ORIGIN: ${PUBLIC_URL:-http://localhost:8080}
+      DATABASE_URL: postgres://${POSTGRES_USER:-kando}:${POSTGRES_PASSWORD:-kando}@db:5432/${POSTGRES_DB:-kando}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      S3_BUCKET: ${S3_BUCKET:-kando}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-kan-do@example.com}
+      FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin1234}
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3001/readyz || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    image: ${IMAGE_SERVER:-ghcr.io/badwinniepooh/kan-do-server:latest}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ['node', 'dist/worker.js']
+    environment: *app-env
+    depends_on:
+      server:
+        condition: service_healthy
+
+  web:
+    image: ${IMAGE_WEB:-ghcr.io/badwinniepooh/kan-do-web:latest}
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    ports:
+      - '8080:80'
+    depends_on:
+      - server
+
+volumes:
+  db-data:
+  minio-data:

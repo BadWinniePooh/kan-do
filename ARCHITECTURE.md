@@ -1,0 +1,124 @@
+# Kan-Do — Architecture
+
+## Stack & why
+
+| Layer | Choice | Why |
+|---|---|---|
+| Web + Android | React 18 + Vite + Tailwind, wrapped by **Capacitor** for Android | One codebase → consistent terminology/hierarchy across platforms (a spec requirement). Android is online-only, so a webview shell is a perfect fit and FCM push still works natively. |
+| Backend | Node 22 + TypeScript + **Fastify** + **Socket.IO** | First-class WebSockets, tiny surface, same language as frontend (shared types in `packages/shared`), trivial to Dockerize. |
+| Database | **PostgreSQL 16** via Kysely (typed SQL) + node-pg-migrate | Spec-mandated; Kysely keeps queries explicit and indexable; migrations are versioned and reversible (`up`/`down`, exercised in CI). |
+| Jobs | **pg-boss** (Postgres-backed queue) | Recurrence scheduling must survive restarts and never double-fire: pg-boss persists jobs in Postgres, leases them transactionally, and `singletonKey` makes re-scheduling idempotent. No extra infra (no Redis). |
+| Object storage | Any S3 API (**MinIO** in compose) via AWS SDK v3 | App needs only endpoint + credentials from env. Browsers upload/download through presigned URLs, so image bytes never pass through the API. |
+| Auth | Local (bcrypt) + **OIDC** (`openid-client`) + **SAML** (`@node-saml/node-saml`) | IdP configs are per-org DB rows managed in the admin UI — wiring a new IdP is config, not code. SSO users are JIT-provisioned. Session = signed JWT in an httpOnly cookie. |
+
+## Layering (maintainability + testability)
+
+```
+web/ (React SPA)  ──HTTP/WS──▶  server/src/api        (routes: validation + auth glue only)
+                                server/src/services   (orchestration: DB + queue + realtime)
+                                server/src/domain     (PURE: recurrence, metrics, RBAC — no I/O)
+                                server/src/adapters   (S3, SMTP, FCM behind interfaces)
+                                server/src/workers    (pg-boss consumers; same services/domain)
+```
+
+- `domain/` has zero imports from DB/SDKs — the recurrence state machine, metrics
+  math, and RBAC/tenancy decisions are unit-tested exhaustively without infra
+  (46 unit tests today).
+- Services receive an `AppCtx` container; integration tests substitute stub
+  storage/queue/mail/push and use a real Postgres.
+- No business logic in route handlers or React components.
+
+## Data model (core tables)
+
+- `organizations` ─ tenants. `users.org_id` scopes every user (global admins have
+  `org_id NULL`). All org-scoped queries filter by `org_id`; RBAC checks live in
+  `domain/rbac.ts`.
+- `boards` → `board_columns` (with `semantic ∈ {open, done, NULL}` — display name
+  free, semantics fixed; service layer enforces ≥1 open + ≥1 done), `lanes`,
+  `board_members`.
+- `cards` ─ column/lane/position, due date, `recurrence_rule` (structured JSON,
+  rendered to iCal RRULE semantics by the `rrule` lib), recurrence state fields
+  (`recurrence_status`, `closed_at`, `reopen_at`, `reopened_at`, `overdue_at`,
+  `is_overdue`). Partial indexes on `reopen_at`/`overdue_at`/`due_date` keep
+  scheduler scans cheap at scale.
+- `card_owners` ─ zero..n owners; `kind ∈ {user, external}` with a CHECK that
+  exactly one reference is set. `external_owners` is the org-scoped directory of
+  non-account owners.
+- `notes` (raw markdown), `attachments` (S3 keys; `cards.cover_attachment_id`
+  picks the cover), `card_transitions` (append-only column history — the metrics
+  source of truth).
+- `notifications`, `notification_settings` (event × channel toggles),
+  `push_tokens`, `notification_ledger` (dedupe keys → at-most-once sends),
+  `dashboard_configs` (per user, per board or org-wide widget layout).
+- `idp_configs` ─ per-org OIDC/SAML settings.
+
+## Recurrence lifecycle (spec state machine)
+
+1. Card moved to a done-mapped column → `closed_at = now`,
+   `reopen_at = nextOccurrence(rule, now)`, status `awaiting_reopen`; a pg-boss
+   job (`singletonKey = reopen:<card>:<ts>`) fires at `reopen_at`.
+2. Worker reopens the card into the open-mapped column → `reopened_at = now`,
+   `overdue_at = nextOccurrence(rule, now)`, status `reopened`; an overdue-check
+   job fires at `overdue_at`.
+3. Not closed again by `overdue_at` → status `overdue`, `is_overdue = true`,
+   notification fan-out. Closing again at any point resets the cycle.
+
+Overdue is always relative to the last close/reopen — never a fixed calendar
+date. Non-recurring cards: 5-minute cron flags `due_date < now` outside done
+columns. "Interval" = time to the next RRULE occurrence from the reference
+moment (assumption stated: for weekday patterns like Mon+Thu, the period adapts
+to the next scheduled day, which is what the RRULE semantics imply).
+
+Worker jobs re-check card state before acting (card deleted, recurrence removed,
+manually moved → job no-ops), so restarts/retries are safe; the notification
+ledger's unique dedupe key makes each event notify at most once.
+
+## Metrics (from `card_transitions`)
+
+- **Lead time**: creation → first arrival in done.
+- **Cycle time**: first departure from an open column → first arrival in done.
+- **Waiting time**: total dwell in open columns before first done.
+- **Per-column time**: summed dwell per column (open-ended stays count to now).
+
+Computed on read in `domain/metrics.ts` (pure), aggregated per board. Dashboard
+widgets (stat tiles, per-column bar, weekly throughput) are user-configurable
+(selection, order, width) and persisted per user+board.
+
+## Real-time
+
+Socket.IO rooms per board (`board:<id>`), membership-checked with the same RBAC
+on join. API process emits directly; worker processes publish via Postgres
+`NOTIFY`, which the API relays into rooms — so a recurrence reopen appears live
+on every open board. Clients invalidate their query cache on events (server
+state stays the single source of truth; optimistic drag-drop rolls back visibly
+on failure).
+
+## Deployment topology
+
+```
+[browser / Android app]
+   │ https
+[web: nginx serving SPA, proxying /api + /socket.io]
+   │
+[server: Fastify API + Socket.IO]───[worker: pg-boss consumers] (scale either horizontally)
+   │                │                     │
+[PostgreSQL 16]  [MinIO / any S3]      (same DB = queue + relay bus)
+```
+
+Both app images are stateless; all state lives in Postgres + object storage.
+Health: `/healthz` (liveness) and `/readyz` (DB + storage checks) for probes;
+compose wires them, and the same endpoints suit Kubernetes.
+
+## Testing pyramid
+
+- **Unit (most)**: domain — recurrence engine (incl. reopen-then-not-closed,
+  monthly day-31, count-exhausted rules), RBAC (incl. cross-tenant attempts at
+  every level), metrics edge cases. Stub-style: assert observable state, never
+  call counts.
+- **Integration (fewer)**: Fastify + real Postgres — auth, tenancy isolation
+  over HTTP, board invariants, card lifecycle incl. job scheduling; migrations
+  down+up.
+- **E2E (fewest)**: one Playwright smoke — login → board → card → note, against
+  the full compose stack.
+
+CI runs all levels on every push; failures block merge.

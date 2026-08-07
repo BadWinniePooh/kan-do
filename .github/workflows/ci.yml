@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck & build
+        run: pnpm build
+      - name: Unit tests (domain: recurrence, metrics, RBAC)
+        run: pnpm --filter @kan-do/server test
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kando
+          POSTGRES_PASSWORD: kando
+          POSTGRES_DB: kando_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kando"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://kando:kando@localhost:5432/kando_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run migrations (up)
+        run: pnpm --filter @kan-do/server migrate:up
+      - name: Migrations are reversible (down + up again)
+        run: |
+          pnpm --filter @kan-do/server migrate:down
+          pnpm --filter @kan-do/server migrate:up
+      - name: Integration tests (API + DB)
+        run: pnpm --filter @kan-do/server test:integration
+
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Boot full stack
+        run: |
+          cp .env.example .env
+          echo "SESSION_SECRET=ci-secret-$(openssl rand -hex 16)" >> .env
+          docker compose up -d --build
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @kan-do/e2e exec playwright install --with-deps chromium
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fs http://localhost:8080/api/../healthz 2>/dev/null || curl -fs http://localhost:8080 >/dev/null; then
+              if docker compose exec -T server wget -qO- http://localhost:3001/readyz >/dev/null 2>&1; then exit 0; fi
+            fi
+            sleep 2
+          done
+          docker compose logs server
+          exit 1
+      - name: Smoke test (core board/card flow)
+        run: pnpm --filter @kan-do/e2e test
+        env:
+          E2E_BASE_URL: http://localhost:8080
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs
