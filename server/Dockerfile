@@ -23,6 +23,6 @@ COPY --from=build /app/server/migrations server/migrations
 WORKDIR /app/server
 EXPOSE 3001
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
-  CMD wget -qO- http://localhost:3001/healthz || exit 1
+  CMD wget -qO- http://127.0.0.1:3001/healthz || exit 1
 # API by default; worker containers override with: node dist/worker.js
 CMD ["sh", "-c", "npx node-pg-migrate up -m migrations && node dist/index.js"]

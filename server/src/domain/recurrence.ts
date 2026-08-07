@@ -12,8 +12,13 @@
  * "interval" is therefore always time-to-next-occurrence relative to the last
  * close/reopen, never a fixed calendar due date.
  */
-import { RRule, Weekday } from 'rrule';
+// rrule ships CommonJS; Node's ESM loader only supports its default export,
+// so destructure from the default (named imports crash at runtime).
+import rrule from 'rrule';
+import type { Weekday, RRule as RRuleInstance } from 'rrule';
 import type { RecurrenceRule, RecurrenceStatus } from '@kan-do/shared';
+
+const { RRule } = rrule;
 
 export interface RecurrenceState {
   status: RecurrenceStatus;
@@ -35,7 +40,7 @@ export const initialState: RecurrenceState = {
 
 const WEEKDAYS = [RRule.MO, RRule.TU, RRule.WE, RRule.TH, RRule.FR, RRule.SA, RRule.SU];
 
-export function toRRule(rule: RecurrenceRule, dtstart: Date): RRule {
+export function toRRule(rule: RecurrenceRule, dtstart: Date): RRuleInstance {
   const freqMap = {
     daily: RRule.DAILY,
     weekly: RRule.WEEKLY,

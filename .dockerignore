@@ -1,0 +1,15 @@
+# Never ship host installs/builds into the image — containers install and
+# build themselves; host node_modules (Windows junctions into a host pnpm
+# store) would clobber the in-image links after COPY.
+**/node_modules
+**/dist
+**/build
+.git
+.github
+e2e
+web/android
+**/*.log
+.env
+.env.*
+!.env.example
+coverage
