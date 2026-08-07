@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -42,7 +42,9 @@ export default function BoardPage() {
   const [editColumns, setEditColumns] = useState(false);
   const [boardSettings, setBoardSettings] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
-  const [newCardCol, setNewCardCol] = useState<string | null>(null);
+  // the quick-add form belongs to one column AND one lane — a board with
+  // swimlanes has a separate drop cell per pair
+  const [newCardAt, setNewCardAt] = useState<{ columnId: string; laneId: string | null } | null>(null);
   const [gatedMove, setGatedMove] = useState<{ card: Card; laneId: string | null; requirements: MoveRequirements } | null>(null);
 
   const sensors = useSensors(
@@ -181,8 +183,8 @@ export default function BoardPage() {
                         );
                       })()}
                       <button
-                        aria-label={`Add card to ${col.name}`}
-                        onClick={() => setNewCardCol(col.id)}
+                        aria-label={lane.name ? `Add card to ${col.name} in ${lane.name}` : `Add card to ${col.name}`}
+                        onClick={() => setNewCardAt({ columnId: col.id, laneId: lane.id })}
                         className="ml-auto text-gray-400 hover:text-gray-700"
                       >
                         +
@@ -203,15 +205,13 @@ export default function BoardPage() {
                           />
                         ))}
                     </div>
-                    {newCardCol === col.id && (
+                    {newCardAt?.columnId === col.id && newCardAt.laneId === lane.id && (
                       <QuickAdd
                         boardId={boardId!}
                         columnId={col.id}
                         laneId={lane.id}
-                        onDone={() => {
-                          setNewCardCol(null);
-                          void qc.invalidateQueries({ queryKey: ['board', boardId] });
-                        }}
+                        onAdded={() => void qc.invalidateQueries({ queryKey: ['board', boardId] })}
+                        onClose={() => setNewCardAt(null)}
                       />
                     )}
                   </ColumnDrop>
@@ -268,24 +268,44 @@ function ColumnDrop({ columnId, laneId, children }: { columnId: string; laneId: 
   );
 }
 
+/**
+ * Inline card entry. Adding does NOT close the form: the field clears and keeps
+ * focus so titles can be typed and Entered back to back. Only an explicit
+ * dismiss (Escape, or a click outside) closes it.
+ *
+ * The field is never disabled while a create is in flight — that would steal
+ * focus mid-run. It clears optimistically instead, and a failed create hands
+ * the title back if the user has not started typing the next one.
+ */
 function QuickAdd({
   boardId,
   columnId,
   laneId,
-  onDone,
+  onAdded,
+  onClose,
 }: {
   boardId: string;
   columnId: string;
   laneId: string | null;
-  onDone: () => void;
+  /** a card landed — refresh the board, but stay open */
+  onAdded: () => void;
+  onClose: () => void;
 }) {
   const [title, setTitle] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const formRef = useDismiss<HTMLFormElement>(onDone);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const formRef = useDismiss<HTMLFormElement>(onClose);
   const create = useMutation({
-    mutationFn: () => post('/api/cards', { boardId, columnId, laneId, title: title.trim() }),
-    onSuccess: onDone,
-    onError: (e) => setError(e.message),
+    mutationFn: (t: string) => post('/api/cards', { boardId, columnId, laneId, title: t }),
+    onSuccess: () => {
+      inputRef.current?.focus();
+      onAdded();
+    },
+    onError: (e, t) => {
+      setError(e.message);
+      // don't clobber whatever the user has typed since
+      setTitle((current) => current || t);
+    },
   });
   return (
     <form
@@ -293,7 +313,11 @@ function QuickAdd({
       className="mt-2"
       onSubmit={(e) => {
         e.preventDefault();
-        if (title.trim() && !create.isPending) create.mutate();
+        const t = title.trim();
+        if (!t) return;
+        setTitle('');
+        setError(null);
+        create.mutate(t);
       }}
     >
       <label className="sr-only" htmlFor={`qa-${columnId}`}>
@@ -301,12 +325,12 @@ function QuickAdd({
       </label>
       <input
         id={`qa-${columnId}`}
+        ref={inputRef}
         autoFocus
         value={title}
-        disabled={create.isPending}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Card title, Enter to add"
-        className="w-full border rounded px-2 py-1 text-sm disabled:opacity-50"
+        className="w-full border rounded px-2 py-1 text-sm"
       />
       {error && (
         <p role="alert" className="text-xs text-red-700 mt-1">
