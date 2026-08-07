@@ -85,26 +85,55 @@ one-size layout.
   notification settings.
 
 ### Reliability
-- No silent data loss: writes (card edits, moves, uploads) either succeed and are confirmed, or fail visibly to the user — no partial/lost updates.
-- Recurrence and notification processing (scheduler/workers) must survive restarts and not double-fire or drop events (idempotent job processing, persisted schedule state).
-- Automated tests: unit tests for business logic (recurrence state machine, metrics calculation, RBAC/tenancy isolation), integration tests for the API, and at least smoke-level e2e tests for the core board/card flow. CI must run these on every push.
-- Health checks for all services (app, DB, object storage, workers), suitable for container orchestration liveness/readiness probes.
-- Structured logging and error tracking (e.g. captured stack traces with request/user context) — enough to diagnose a production issue without reproducing it locally.
+- No silent data loss: writes (card edits, moves, uploads) either succeed and are
+  confirmed, or fail visibly to the user — no partial/lost updates.
+- Recurrence and notification processing (scheduler/workers) must survive restarts and
+  not double-fire or drop events (idempotent job processing, persisted schedule state).
+- Testability by design: core business logic (recurrence state machine, metrics
+  calculation, RBAC/tenancy isolation) must be pure/isolated from I/O — DB, object
+  storage, email/push, and IdP calls sit behind interfaces/adapters, so this logic is
+  unit-testable without spinning up real infrastructure.
+- Follow the testing pyramid: many fast unit tests, fewer integration tests (API + DB),
+  fewest end-to-end tests (smoke-level, core board/card flow only). Do not invert this —
+  e2e/integration tests should not be the primary way business logic gets covered.
+- Unit tests favor stubs over mocks: prefer real/lightweight stand-ins for dependencies
+  and assert on observable behavior/output, not on internal calls or interaction counts.
+  Avoid mock-and-verify-call-was-made style tests that couple tests to implementation
+  detail.
+- Recurrence engine and RBAC/tenancy-isolation logic get a higher bar: exhaustive unit
+  coverage of edge cases (e.g. reopen-then-not-closed-in-time, cross-tenant access
+  attempts), not just happy-path.
+- CI runs the full test suite (all pyramid levels) on every push; a failing test blocks
+  merge.
+- Health checks for all services (app, DB, object storage, workers), suitable for
+  container orchestration liveness/readiness probes.
+- Structured logging and error tracking (e.g. captured stack traces with request/user
+  context) — enough to diagnose a production issue without reproducing it locally.
 
 ### Maintainability
 - Layered/modular architecture with a clear boundary between API, business logic
-  (recurrence engine, metrics engine), and data access — no business logic embedded in UI or route handlers.
+  (recurrence engine, metrics engine), and data access — no business logic embedded in
+  UI or route handlers.
 - Consistent code style enforced via linter/formatter in CI, not manual review.
-- Every module/service documented with its purpose and how it fits the whole (README per major component is enough, no need for exhaustive inline docs).
-- DB schema changes go through versioned, reversible migrations only — no manual schema edits.
-- Config (SSO/SAML, S3, email/push credentials, DB) via environment variables/config file, never hardcoded — one place to change per environment.
+- Every module/service documented with its purpose and how it fits the whole (README per
+  major component is enough, no need for exhaustive inline docs).
+- DB schema changes go through versioned, reversible migrations only — no manual schema
+  edits.
+- Config (SSO/SAML, S3, email/push credentials, DB) via environment variables/config
+  file, never hardcoded — one place to change per environment.
 
 ### Usability
-- Board interactions (drag-drop, card expand, column edit) must give immediate visual feedback — no action that looks like it silently did nothing.
-- Overdue/highlighted states, owner badges, and recurrence status must be understandable at a glance, without opening the card.
-- Forms (task edit, recurrence builder, admin user management) validate inline with clear error messages — no silent rejection or generic "error occurred."
-- Meet basic accessibility: keyboard-navigable board and forms, sufficient color contrast (don't rely on color alone for overdue/status — pair with icon/text), screen-reader labels on icon-only controls.
-- Mobile and web share consistent terminology and information hierarchy, so a user moving between them isn't relearning the app.
+- Board interactions (drag-drop, card expand, column edit) must give immediate visual
+  feedback — no action that looks like it silently did nothing.
+- Overdue/highlighted states, owner badges, and recurrence status must be understandable
+  at a glance, without opening the card.
+- Forms (task edit, recurrence builder, admin user management) validate inline with clear
+  error messages — no silent rejection or generic "error occurred."
+- Meet basic accessibility: keyboard-navigable board and forms, sufficient color contrast
+  (don't rely on color alone for overdue/status — pair with icon/text), screen-reader
+  labels on icon-only controls.
+- Mobile and web share consistent terminology and information hierarchy, so a user
+  moving between them isn't relearning the app.
 
 ## Deliverables
 1. Brief architecture write-up (stack choices + why, data model overview, deployment
