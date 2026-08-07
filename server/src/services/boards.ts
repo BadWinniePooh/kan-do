@@ -128,6 +128,23 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
     ...o,
     user_avatar: o.user_avatar ? (avatarUrls.get(o.user_avatar) ?? null) : null,
   }));
+  // Board-level readiness, so a user can see whether a card is ready to move
+  // and whether it is blocked WITHOUT opening it or attempting a move.
+  const [policyProgress, blockers] = await Promise.all([
+    cardIds.length
+      ? ctx.db.selectFrom('card_policy_progress').select(['card_id', 'policy_id']).where('card_id', 'in', cardIds).execute()
+      : [],
+    cardIds.length
+      ? ctx.db
+          .selectFrom('card_blockers')
+          .select(['id', 'card_id', 'reason', 'started_at'])
+          .where('card_id', 'in', cardIds)
+          .where('ended_at', 'is', null)
+          .orderBy('started_at')
+          .execute()
+      : [],
+  ]);
+
   const coveredCards = cards.filter((c) => c.cover_attachment_id);
   const covers: Record<string, string> = {};
   if (coveredCards.length) {
@@ -142,7 +159,7 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
       if (key) covers[c.id] = await ctx.storage.presignDownload(key);
     }
   }
-  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers, categories, policies };
+  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers, categories, policies, policyProgress, blockers };
 }
 
 export async function updateBoard(ctx: AppCtx, actor: Actor, boardId: string, patch: { name?: string }) {

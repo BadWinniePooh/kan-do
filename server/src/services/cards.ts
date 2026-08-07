@@ -13,6 +13,7 @@ import { badRequest, conflict, forbidden, notFound } from './context.js';
 import { assertBoardAccess } from './boards.js';
 import { blockedDetails, evaluateMove, requiresReason, type GuardColumn } from '../domain/moveGuard.js';
 import { checkedPolicyIds, movePolicies, saveProgress } from './policies.js';
+import { activeBlockers } from './blockers.js';
 import { scheduleOverdueCheck, scheduleReopen } from '../jobs/queue.js';
 
 async function assertCardEdit(ctx: AppCtx, actor: Actor, cardId: string) {
@@ -153,7 +154,10 @@ async function guardMove(
   toCol: GuardColumn,
   opts: MoveOptions,
 ) {
-  const { leavePolicies, enterPolicies } = await movePolicies(ctx.db, fromCol.id, toCol.id);
+  const [{ leavePolicies, enterPolicies }, blockers] = await Promise.all([
+    movePolicies(ctx.db, fromCol.id, toCol.id),
+    activeBlockers(ctx.db, cardId),
+  ]);
   const applicable = [...leavePolicies, ...enterPolicies];
 
   if (fromCol.id !== toCol.id && applicable.length) {
@@ -167,7 +171,13 @@ async function guardMove(
     leavePolicies,
     enterPolicies,
     checkedIds,
-    override: { policies: opts.override?.policies, backwards: opts.override?.backwards, lane: opts.override?.lane },
+    activeBlockers: blockers,
+    override: {
+      policies: opts.override?.policies,
+      backwards: opts.override?.backwards,
+      lane: opts.override?.lane,
+      blockers: opts.override?.blockers,
+    },
   });
 
   if (result.blocked) {
@@ -175,6 +185,9 @@ async function guardMove(
     if (result.unmet.length && !opts.override?.policies) why.push('unmet column policies');
     if (result.backwards && !opts.override?.backwards) why.push('cards cannot move to an earlier column in their lane');
     if (result.laneMove && !opts.override?.lane) why.push('cards are not meant to move between lanes');
+    if (result.activeBlockers.length && !opts.override?.blockers) {
+      why.push(`${result.activeBlockers.length} unresolved blocker(s) on the card`);
+    }
     throw conflict(
       `move blocked: ${why.join('; ')}`,
       blockedDetails(result, checkedIds.filter((id) => applicable.some((p) => p.id === id))),
@@ -202,7 +215,7 @@ export interface MoveOptions {
   /** justification — mandatory for overrides and for discards */
   reason?: string;
   /** deliberate bypasses — each one recorded in card_move_overrides */
-  override?: { policies?: boolean; backwards?: boolean; lane?: boolean };
+  override?: { policies?: boolean; backwards?: boolean; lane?: boolean; blockers?: boolean };
 }
 
 /**
@@ -340,6 +353,10 @@ export async function moveCard(
           actor_id: actor?.userId ?? null,
           backwards: guard.backwards,
           lane_move: guard.laneMove,
+          blocked: guard.bypassedBlockers.length > 0,
+          blockers: JSON.stringify(
+            guard.bypassedBlockers.map((b) => ({ blockerId: b.id, reason: b.reason, startedAt: b.startedAt })),
+          ),
           skipped_policies: JSON.stringify(
             guard.skipped.map((p) => ({ policyId: p.id, kind: p.kind, label: p.label, columnId: p.columnId, columnName: p.columnName })),
           ),
@@ -484,7 +501,7 @@ export async function getCardAudit(ctx: AppCtx, actor: Actor, cardId: string) {
   if (!card) throw notFound('card');
   await assertBoardAccess(ctx.db, actor, card.board_id, 'view');
 
-  const [transitions, overrides, columns, lanes] = await Promise.all([
+  const [transitions, overrides, columns, lanes, blockers] = await Promise.all([
     ctx.db
       .selectFrom('card_transitions')
       .leftJoin('users', 'users.id', 'card_transitions.actor_id')
@@ -509,6 +526,8 @@ export async function getCardAudit(ctx: AppCtx, actor: Actor, cardId: string) {
         'card_move_overrides.to_column_id',
         'card_move_overrides.backwards',
         'card_move_overrides.lane_move',
+        'card_move_overrides.blocked',
+        'card_move_overrides.blockers',
         'card_move_overrides.skipped_policies',
         'card_move_overrides.reason',
         'card_move_overrides.at',
@@ -525,6 +544,20 @@ export async function getCardAudit(ctx: AppCtx, actor: Actor, cardId: string) {
       .where('board_id', '=', card.board_id)
       .execute(),
     ctx.db.selectFrom('lanes').select(['id', 'name']).where('board_id', '=', card.board_id).execute(),
+    ctx.db
+      .selectFrom('card_blockers')
+      .leftJoin('users as creator', 'creator.id', 'card_blockers.created_by')
+      .leftJoin('users as resolver', 'resolver.id', 'card_blockers.resolved_by')
+      .select([
+        'card_blockers.id',
+        'card_blockers.reason',
+        'card_blockers.started_at',
+        'card_blockers.ended_at',
+        'creator.display_name as created_by_name',
+        'resolver.display_name as resolved_by_name',
+      ])
+      .where('card_blockers.card_id', '=', cardId)
+      .execute(),
   ]);
 
   const laneName = new Map(lanes.map((l) => [l.id, l.name]));
@@ -557,8 +590,11 @@ export async function getCardAudit(ctx: AppCtx, actor: Actor, cardId: string) {
         backwards: boolean;
         laneMove: boolean;
         skipped: { label: string; kind: string; columnName?: string }[];
+        bypassedBlockers: { reason: string }[];
         reason: string | null;
-      };
+      }
+    | { kind: 'blocked'; at: Date; actorName: string | null; blockerId: string; reason: string }
+    | { kind: 'unblocked'; at: Date; actorName: string | null; blockerId: string; reason: string };
 
   const entries: { rank: number; entry: Entry }[] = [];
   for (const t of transitions) {
@@ -594,9 +630,24 @@ export async function getCardAudit(ctx: AppCtx, actor: Actor, cardId: string) {
         backwards: o.backwards,
         laneMove: o.lane_move,
         skipped: Array.isArray(o.skipped_policies) ? (o.skipped_policies as { label: string; kind: string }[]) : [],
+        bypassedBlockers: Array.isArray(o.blockers) ? (o.blockers as { reason: string }[]) : [],
         reason: o.reason,
       },
     });
+  }
+
+  // a blocker is two moments in the card's life, not one row
+  for (const b of blockers) {
+    entries.push({
+      rank: 0,
+      entry: { kind: 'blocked', at: b.started_at, actorName: b.created_by_name, blockerId: b.id, reason: b.reason },
+    });
+    if (b.ended_at) {
+      entries.push({
+        rank: 0,
+        entry: { kind: 'unblocked', at: b.ended_at, actorName: b.resolved_by_name, blockerId: b.id, reason: b.reason },
+      });
+    }
   }
 
   entries.sort((a, b) => a.entry.at.getTime() - b.entry.at.getTime() || a.rank - b.rank);

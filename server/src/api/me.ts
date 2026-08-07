@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { AppCtx } from '../services/context.js';
 import { requireAuth } from '../auth/plugin.js';
-import { runPivotQuery, runMultiPivotQuery } from '../services/pivotQuery.js';
+import { runPivotQuery, runMultiPivotQuery, runFactsQuery } from '../services/pivotQuery.js';
 import { DIMENSIONS, METRICS, AGGREGATIONS } from '../domain/pivot.js';
 
 /** One plotted series of a multi-series widget (e.g. a burnup's "scope"). */
@@ -186,6 +186,7 @@ export function meRoutes(ctx: AppCtx) {
                 'overdueCount',
                 'throughput',
                 'outcomes',
+                'blockers',
                 'policyOverrides',
                 'custom',
               ]),
@@ -259,6 +260,21 @@ export function meRoutes(ctx: AppCtx) {
         })
         .parse(raw);
       return runPivotQuery(ctx, req.actor!, body);
+    });
+
+    /**
+     * Raw fact rows for the widget builder's data browser — same collector and
+     * the same access scoping as the queries, so browsing never reveals a row a
+     * chart could not.
+     */
+    app.post('/dashboard/facts', async (req) => {
+      const body = z
+        .object({
+          boardIds: z.array(z.string().uuid()).max(50).optional(),
+          limit: z.number().int().min(1).max(500).default(200),
+        })
+        .parse(req.body ?? {});
+      return runFactsQuery(ctx, req.actor!, body);
     });
 
     // ---- uploads (presigned; the browser PUTs directly to object storage) ----

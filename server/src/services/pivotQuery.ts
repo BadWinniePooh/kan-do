@@ -13,6 +13,10 @@ import { computeCardMetrics } from '../domain/metrics.js';
 import {
   pivot,
   multiPivot,
+  displayValue,
+  DIMENSIONS,
+  DIMENSION_LABELS,
+  type Dimension,
   type CardFact,
   type PivotQuery,
   type PivotRow,
@@ -82,6 +86,27 @@ async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Pro
       overridesByCard.set(o.card_id, entry);
     }
 
+    // blockers: how often work stalled, why, and for how long. An unresolved
+    // blocker is still running, so it counts up to `now`.
+    const blockerRows = await ctx.db
+      .selectFrom('card_blockers')
+      .select(['card_id', 'reason', 'started_at', 'ended_at'])
+      .where(
+        'card_id',
+        'in',
+        cards.map((c) => c.id),
+      )
+      .execute();
+    const blockersByCard = new Map<string, { reasons: string[]; totalMs: number; count: number; active: boolean }>();
+    for (const b of blockerRows) {
+      const entry = blockersByCard.get(b.card_id) ?? { reasons: [], totalMs: 0, count: 0, active: false };
+      entry.count += 1;
+      entry.reasons.push(b.reason);
+      entry.totalMs += (b.ended_at ?? now).getTime() - b.started_at.getTime();
+      if (!b.ended_at) entry.active = true;
+      blockersByCard.set(b.card_id, entry);
+    }
+
     for (const card of cards) {
       const transitions = await ctx.db
         .selectFrom('card_transitions')
@@ -122,6 +147,7 @@ async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Pro
       const currentSemantic = semantics.get(card.column_id);
       const outcome = currentSemantic === 'done' ? 'Done' : currentSemantic === 'discard' ? 'Discarded' : 'Active';
       const ov = overridesByCard.get(card.id);
+      const bl = blockersByCard.get(card.id);
 
       facts.push({
         board: board.name,
@@ -134,14 +160,20 @@ async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Pro
         closedMonth,
         outcome,
         overrideStatus: ov ? 'overridden' : 'clean',
+        blockStatus: bl?.active ? 'Blocked now' : bl ? 'Was blocked' : 'Never blocked',
         discardReason,
         overrideReasons: ov?.reasons ?? [],
         overriddenPolicies: ov?.policies ?? [],
+        blockerReasons: bl?.reasons ?? [],
         leadTimeMs: m.leadTimeMs,
         cycleTimeMs: m.cycleTimeMs,
         waitingTimeMs: m.waitingTimeMs,
         timeInColumnMs: m.perColumnMs[card.column_id] ?? null,
         overrideCount: ov?.count ?? 0,
+        blockerCount: bl?.count ?? 0,
+        // null, not 0, for a card that was never blocked: averaging "blocked
+        // duration" must not be dragged down by cards that never stalled
+        blockedTimeMs: bl ? bl.totalMs : null,
       });
     }
   }
@@ -156,6 +188,50 @@ export async function runPivotQuery(
 ): Promise<{ rows: PivotRow[]; boardCount: number }> {
   const { facts, boardCount } = await collectFacts(ctx, actor, query.boardIds);
   return { rows: pivot(facts, query), boardCount };
+}
+
+/** Field catalogue for the widget builder's data browser. */
+export const FACT_FIELDS: { key: string; label: string; kind: 'dimension' | 'metric'; format: 'text' | 'count' | 'duration' }[] = [
+  ...DIMENSIONS.map((key) => ({ key, label: DIMENSION_LABELS[key], kind: 'dimension' as const, format: 'text' as const })),
+  { key: 'count', label: 'Card count', kind: 'metric', format: 'count' },
+  { key: 'leadTimeMs', label: 'Lead time', kind: 'metric', format: 'duration' },
+  { key: 'cycleTimeMs', label: 'Cycle time', kind: 'metric', format: 'duration' },
+  { key: 'waitingTimeMs', label: 'Waiting time', kind: 'metric', format: 'duration' },
+  { key: 'timeInColumnMs', label: 'Time in current column', kind: 'metric', format: 'duration' },
+  { key: 'blockedTimeMs', label: 'Blocked time', kind: 'metric', format: 'duration' },
+  { key: 'blockerCount', label: 'Blockers', kind: 'metric', format: 'count' },
+  { key: 'overrideCount', label: 'Rule overrides', kind: 'metric', format: 'count' },
+];
+
+/**
+ * The raw fact rows behind every widget, for the builder's spreadsheet-style
+ * browser: the user picks grouping and measures by clicking real columns of
+ * real data instead of choosing abstract labels from a dropdown.
+ *
+ * Same collector, same access scoping as the queries themselves — browsing can
+ * never reveal a row a chart could not.
+ */
+export async function runFactsQuery(
+  ctx: AppCtx,
+  actor: Actor,
+  query: { boardIds?: string[]; limit?: number },
+): Promise<{ fields: typeof FACT_FIELDS; rows: Record<string, unknown>[]; total: number; boardCount: number }> {
+  const { facts, boardCount } = await collectFacts(ctx, actor, query.boardIds);
+  const limit = query.limit ?? 200;
+  const rows = facts.slice(0, limit).map((f) => {
+    const row: Record<string, unknown> = { count: 1 };
+    for (const field of FACT_FIELDS) {
+      if (field.key === 'count') continue;
+      // multi-valued dimensions (owner, blocker reason, …) collapse to one
+      // readable cell here; grouping still explodes them
+      row[field.key] =
+        field.kind === 'dimension'
+          ? displayValue(f, field.key as Dimension)
+          : (f as unknown as Record<string, unknown>)[field.key];
+    }
+    return row;
+  });
+  return { fields: FACT_FIELDS, rows, total: facts.length, boardCount };
 }
 
 export async function runMultiPivotQuery(

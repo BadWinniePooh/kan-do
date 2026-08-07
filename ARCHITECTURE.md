@@ -63,7 +63,18 @@ web/ (React SPA)  ──HTTP/WS──▶  server/src/api        (routes: validat
   (which policies, whether backwards, whether cross-lane, by whom, when, and the
   mandatory reason — skipped policies denormalised as JSON so the record
   outlives the policy).
+- `card_blockers` ─ a stated reason a card cannot progress (`reason`,
+  `started_at`, `ended_at` null while active), with markdown
+  `card_blocker_comments`. Strictly dependent on a card: CASCADE, and no
+  nullable `card_id` to orphan one. A partial index on the active ones keeps the
+  per-board "is this blocked" lookup cheap.
 - `idp_configs` ─ per-org OIDC/SAML settings.
+
+> **Deleting an organization deletes its boards first** (see
+> `DELETE /api/admin/orgs/:orgId`). Doing it in one statement makes Postgres
+> cascade users and cards together, and clearing a deleted user from
+> `card_blockers.created_by` (ON DELETE SET NULL) re-checks that row's `card_id`
+> against a card the same command already removed, which errors.
 
 ## Recurrence lifecycle (spec state machine)
 
@@ -106,9 +117,9 @@ collector in `services/pivotQuery.ts`, which only ever reads boards the caller
 can access; the builder's live preview calls that same endpoint, so a preview
 can never reveal more than the saved widget would.
 
-## Card movement: the three gates
+## Card movement: the four gates
 
-A move is decided by three independent gates, all pure in `domain/moveGuard.ts`:
+A move is decided by four independent gates, all pure in `domain/moveGuard.ts`:
 
 1. **Policies** — the source column's `leave` checklist plus the target column's
    `enter` checklist must all be ticked.
@@ -116,6 +127,9 @@ A move is decided by three independent gates, all pure in `domain/moveGuard.ts`:
    scoped, so this compares positions **inside the card's own lane**; across
    lanes there is no shared order to compare and the lane gate governs instead.
 3. **Lane** — moving a card to a different lane is not intended and is blocked.
+4. **Blockers** — an unresolved blocker holds the card where it is. Overriding
+   moves the card but does NOT resolve the blocker; it stays open and the
+   bypassed blockers are copied into the audit row.
 
 `services/cards.ts` loads the columns and policies, persists the submitted ticks
 **before** deciding (so a refused attempt never loses partial progress), and
@@ -151,6 +165,20 @@ not active work, and never a successful outcome.
   discard. Board metrics report `outcomes.{completedCount, discardedCount,
   activeCount, completionRate}` where completion means done, never discard.
 
+## Readiness and blockers on the board itself
+
+Neither "can this card move yet?" nor "is it blocked?" should require opening a
+card or attempting a move to find out. `getBoardDetail` therefore ships each
+card's ticked policy ids and its active blockers alongside the cards, and the
+board renders both: a `n/m` readiness chip counting the current column's
+before-leaving policies, and a rose fill + ring + `⛔ blocked` badge on blocked
+cards. Overdue keeps the red LEFT BAR and blocked owns the RING + FILL so a card
+that is both stays readable, and each state always carries text as well as
+colour. Clicking the readiness chip opens a preview that also checks the
+destination's before-entering policies and saves ticks — through the same
+`move-progress` endpoint a real move uses, so preparation is never wasted. The
+preview has no move button on purpose: it is the preview, not the gate.
+
 ## Card audit view
 
 `GET /api/cards/:id/audit` returns one chronological timeline: creation, every
@@ -160,12 +188,27 @@ bypassed, by whom, and the justification). It is assembled from
 from — plus `card_move_overrides`, so there is no second history to diverge.
 Access is the board's existing view permission; the audit adds no new tier.
 
-Overrides and discard reasons also surface in board metrics, a per-board audit
-endpoint, and the pivot engine: dimensions `outcome`, `overrideStatus`,
-`discardReason`, `overrideReason` and `overriddenPolicy` (the last two multi-
-valued — a card explodes into one row per override), plus the `overrideCount`
-metric. Note that the `column` dimension groups by column *name*, so the same
-name across lanes groups together on purpose; pair it with `lane` to split them.
+Overrides, discard reasons and blockers also surface in board metrics, a
+per-board audit endpoint, and the pivot engine: dimensions `outcome`,
+`overrideStatus`, `discardReason`, `overrideReason`, `overriddenPolicy`,
+`blockStatus` and `blockerReason` (the multi-valued ones explode a card into one
+row per override or blocker), plus the `overrideCount`, `blockerCount` and
+`blockedTimeMs` metrics. `blockedTimeMs` is **null**, not zero, for a card that
+was never blocked, so averaging stall time is not dragged down by cards that
+never stalled. Note that the `column` dimension groups by column *name*, so the
+same name across lanes groups together on purpose; pair it with `lane` to split.
+
+## Widget builder: picking data, not labels
+
+The builder's field selection is a spreadsheet, not a form. `POST
+/api/me/dashboard/facts` returns the real fact rows behind the widget — one row
+per card, one column per available field — through the *same* collector and
+access scoping as the queries, so browsing can never reveal a row a chart could
+not. The user clicks column headers: text columns become grouping (up to two),
+number columns become measures, and picking a second number column promotes the
+widget to multi-series. Per-series refinements the table cannot express (label,
+aggregation, a series' own `dimension`, running total) stay in the series editor
+underneath, and the burnup preset still fills all of it in one click.
 
 ## Real-time
 

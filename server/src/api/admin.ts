@@ -61,10 +61,21 @@ export function globalAdminRoutes(ctx: AppCtx) {
         .executeTakeFirstOrThrow();
     });
 
-    /** Deletes the org and, via FK cascade, all its users/boards/cards/etc. */
+    /**
+     * Deletes the org and, via FK cascade, all its users/boards/cards/etc.
+     *
+     * Boards go first, deliberately. Deleting the org in one statement makes
+     * Postgres cascade users and cards together, and clearing a deleted user
+     * from card_blockers.created_by (ON DELETE SET NULL) re-checks that row's
+     * card_id against a card the same command already removed — which errors.
+     * Removing the boards first empties those tables before the users go.
+     */
     app.delete('/orgs/:orgId', async (req) => {
       const { orgId } = req.params as { orgId: string };
-      await ctx.db.deleteFrom('organizations').where('id', '=', orgId).execute();
+      await ctx.db.transaction().execute(async (trx) => {
+        await trx.deleteFrom('boards').where('org_id', '=', orgId).execute();
+        await trx.deleteFrom('organizations').where('id', '=', orgId).execute();
+      });
       return { ok: true };
     });
 

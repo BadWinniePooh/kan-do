@@ -14,14 +14,18 @@ const fact = (over: Partial<CardFact>): CardFact => ({
   closedMonth: 'Not done',
   outcome: 'Active',
   overrideStatus: 'clean',
+  blockStatus: 'Never blocked',
   discardReason: 'Not discarded',
   overrideReasons: [],
   overriddenPolicies: [],
+  blockerReasons: [],
   leadTimeMs: null,
   cycleTimeMs: null,
   waitingTimeMs: null,
   timeInColumnMs: null,
   overrideCount: 0,
+  blockerCount: 0,
+  blockedTimeMs: null,
   ...over,
 });
 
@@ -275,5 +279,70 @@ describe('outcome and reason dimensions', () => {
   it('cards with no override fall into a single "No override" bucket', () => {
     const rows = pivot([fact({}), fact({})], { dimensions: ['overrideReason'], metric: 'count', aggregation: 'count' });
     expect(rows).toEqual([{ keys: ['No override'], value: 2, n: 2 }]);
+  });
+});
+
+describe('blocker dimensions and metrics', () => {
+  const HOUR2 = 3_600_000;
+
+  it('splits cards by whether they are, or ever were, blocked', () => {
+    const rows = pivot(
+      [
+        fact({ blockStatus: 'Blocked now', blockerCount: 1 }),
+        fact({ blockStatus: 'Was blocked', blockerCount: 2 }),
+        fact({ blockStatus: 'Was blocked', blockerCount: 1 }),
+        fact({}),
+      ],
+      { dimensions: ['blockStatus'], metric: 'count', aggregation: 'count' },
+    );
+    expect(rows.map((r) => [r.keys[0], r.value])).toEqual([
+      ['Blocked now', 1],
+      ['Never blocked', 1],
+      ['Was blocked', 2],
+    ]);
+  });
+
+  it('groups by blocker reason, exploding a card with several', () => {
+    const rows = pivot(
+      [
+        fact({ blockerReasons: ['waiting on vendor', 'missing spec'], blockerCount: 2 }),
+        fact({ blockerReasons: ['waiting on vendor'], blockerCount: 1 }),
+        fact({}),
+      ],
+      { dimensions: ['blockerReason'], metric: 'count', aggregation: 'count' },
+    );
+    // locale-collated, so case does not force the placeholder to the front
+    expect(rows.map((r) => [r.keys[0], r.value])).toEqual([
+      ['missing spec', 1],
+      ['Never blocked', 1],
+      ['waiting on vendor', 2],
+    ]);
+  });
+
+  it('mean blocked time ignores cards that were never blocked', () => {
+    const rows = pivot(
+      [
+        fact({ column: 'Doing', blockedTimeMs: 2 * HOUR2 }),
+        fact({ column: 'Doing', blockedTimeMs: 4 * HOUR2 }),
+        fact({ column: 'Doing', blockedTimeMs: null }), // never blocked, not a zero
+      ],
+      { dimensions: ['column'], metric: 'blockedTimeMs', aggregation: 'avg' },
+    );
+    expect(rows[0]!.value).toBe(3 * HOUR2);
+  });
+
+  it('how often work stalls, per lane', () => {
+    const rows = pivot(
+      [
+        fact({ lane: 'Team A', blockerCount: 2 }),
+        fact({ lane: 'Team A', blockerCount: 1 }),
+        fact({ lane: 'Team B', blockerCount: 0 }),
+      ],
+      { dimensions: ['lane'], metric: 'blockerCount', aggregation: 'sum' },
+    );
+    expect(rows.map((r) => [r.keys[0], r.value])).toEqual([
+      ['Team A', 3],
+      ['Team B', 0],
+    ]);
   });
 });

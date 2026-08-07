@@ -27,11 +27,20 @@ export interface PolicyRef {
   columnName: string;
 }
 
+/** An unresolved reason a card cannot progress. */
+export interface BlockerRef {
+  id: string;
+  reason: string;
+  startedAt: string;
+}
+
 /** Payload of the 409 a blocked move returns, so the UI can show the checklist. */
 export interface MoveBlockedDetails {
   backwards: boolean;
   /** the move crosses into another lane — blocked by default */
   laneMove: boolean;
+  /** blockers still open on the card, holding it in place */
+  activeBlockers: BlockerRef[];
   /** every policy that applies to this move (source 'leave' + target 'enter') */
   applicable: PolicyRef[];
   /** the subset still unticked */

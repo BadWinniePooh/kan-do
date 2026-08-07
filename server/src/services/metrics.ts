@@ -114,6 +114,17 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
   const skippedCount = (r: (typeof overrideRows)[number]) =>
     Array.isArray(r.skipped_policies) ? r.skipped_policies.length : 0;
 
+  // blockers: how often work stalls and for how long. An unresolved blocker
+  // counts up to `now`, otherwise the stall is over and has a real duration.
+  const blockerRows = await ctx.db
+    .selectFrom('card_blockers')
+    .innerJoin('cards', 'cards.id', 'card_blockers.card_id')
+    .select(['card_blockers.id', 'card_blockers.card_id', 'card_blockers.reason', 'card_blockers.started_at', 'card_blockers.ended_at'])
+    .where('cards.board_id', '=', boardId)
+    .execute();
+  const blockedDurations = blockerRows.map((b) => (b.ended_at ?? now).getTime() - b.started_at.getTime());
+  const activeBlockerRows = blockerRows.filter((b) => !b.ended_at);
+
   // outcome split — completion is "done", never "discard"
   const doneSet = new Set(doneColumnIds);
   const completedCount = cards.filter((c) => doneSet.has(c.column_id)).length;
@@ -125,6 +136,18 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
     perCard,
     doneEvents: doneEvents.map((d) => ({ at: d.done_at })),
     overdueCount: Number(overdueCount?.n ?? 0),
+    blockers: {
+      /** blockers open right now */
+      activeCount: activeBlockerRows.length,
+      /** cards blocked right now */
+      blockedCardCount: new Set(activeBlockerRows.map((b) => b.card_id)).size,
+      /** every blocker this board ever recorded */
+      totalCount: blockerRows.length,
+      /** distinct cards that were blocked at least once — the "how often" */
+      everBlockedCardCount: new Set(blockerRows.map((b) => b.card_id)).size,
+      meanBlockedMs: meanMs(blockedDurations.length ? blockedDurations : [null]),
+      totalBlockedMs: blockedDurations.reduce((a, b) => a + b, 0),
+    },
     outcomes: {
       completedCount,
       discardedCount,

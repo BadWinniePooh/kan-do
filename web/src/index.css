@@ -38,8 +38,20 @@
 }
 
 /* Overdue: red left border + tinted background + icon (never color alone) */
+/*
+ * Overdue and blocked are different states and must stay distinguishable when a
+ * card is both. Overdue owns the LEFT BAR; blocked owns the RING + FILL. The
+ * blocked rule comes second on purpose so its stronger fill wins the background
+ * — being held is the more actionable fact. Both always carry a text badge too,
+ * so neither is signalled by colour alone, and the category accent keeps its own
+ * top bar above both.
+ */
 .card-overdue {
   @apply border-l-4 border-red-600 bg-red-50;
+}
+
+.card-blocked {
+  @apply bg-rose-100 ring-2 ring-rose-500;
 }
 
 :focus-visible {

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { post, ApiError } from '../api';
-import type { MoveRequirements, PolicyRef } from '../types';
+import type { BlockerRef, MoveRequirements, PolicyRef } from '../types';
 import { useDismiss } from '../useDismiss';
 
 /**
@@ -38,12 +38,13 @@ export default function MovePolicyDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { applicable, backwards, laneMove, discarding, fromColumn, toColumn } = requirements;
+  const { applicable, backwards, laneMove, discarding, activeBlockers, fromColumn, toColumn } = requirements;
   const leaving = useMemo(() => applicable.filter((p) => p.kind === 'leave'), [applicable]);
   const entering = useMemo(() => applicable.filter((p) => p.kind === 'enter'), [applicable]);
   const unmet = applicable.filter((p) => !checked.has(p.id));
   const skippingPolicies = unmet.length > 0;
-  const overriding = skippingPolicies || backwards || laneMove;
+  const blocked = activeBlockers.length > 0;
+  const overriding = skippingPolicies || backwards || laneMove || blocked;
   // discarding is not an override, but it still owes an explanation
   const needsReason = overriding || discarding;
 
@@ -81,6 +82,7 @@ export default function MovePolicyDialog({
                 policies: skippingPolicies || undefined,
                 backwards: backwards || undefined,
                 lane: laneMove || undefined,
+                blockers: blocked || undefined,
               },
             }
           : {}),
@@ -120,6 +122,24 @@ export default function MovePolicyDialog({
           </p>
         </div>
 
+        {blocked && (
+          <div role="alert" className="text-sm bg-rose-50 border border-rose-300 rounded p-3">
+            <p className="font-semibold text-rose-900">
+              This card is blocked by {activeBlockers.length} unresolved {activeBlockers.length === 1 ? 'blocker' : 'blockers'}.
+            </p>
+            <ul className="list-disc pl-5 mt-1 text-rose-900">
+              {activeBlockers.map((b) => (
+                <li key={b.id}>
+                  {b.reason} <span className="text-rose-700 text-xs">(since {new Date(b.startedAt).toLocaleDateString()})</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-rose-900 mt-1">
+              Resolve the blocker on the card to move normally, or override deliberately below.
+            </p>
+          </div>
+        )}
+
         {laneMove && (
           <div role="alert" className="text-sm bg-amber-50 border border-amber-300 rounded p-3">
             <p className="font-semibold text-amber-900">This move changes the card&rsquo;s lane.</p>
@@ -155,6 +175,7 @@ export default function MovePolicyDialog({
           <OverrideConfirmation
             backwards={backwards}
             laneMove={laneMove}
+            activeBlockers={activeBlockers}
             skipped={unmet}
             fromName={fromColumn?.name ?? 'the current column'}
             fromLane={fromColumn?.laneName ?? ''}
@@ -252,6 +273,7 @@ export default function MovePolicyDialog({
           <p className="text-xs text-gray-500 text-right">
             {[
               skippingPolicies && `${unmet.length} unticked ${unmet.length === 1 ? 'policy' : 'policies'}`,
+              blocked && `${activeBlockers.length} active ${activeBlockers.length === 1 ? 'blocker' : 'blockers'}`,
               backwards && 'a backwards move',
               laneMove && 'a lane change',
             ]
@@ -303,6 +325,7 @@ function PolicyChecklist({
 function OverrideConfirmation({
   backwards,
   laneMove,
+  activeBlockers,
   skipped,
   fromName,
   fromLane,
@@ -313,6 +336,7 @@ function OverrideConfirmation({
 }: {
   backwards: boolean;
   laneMove: boolean;
+  activeBlockers: BlockerRef[];
   skipped: PolicyRef[];
   fromName: string;
   fromLane: string;
@@ -324,6 +348,25 @@ function OverrideConfirmation({
   return (
     <div className="border-2 border-red-300 bg-red-50 rounded p-3 space-y-3">
       <h3 className="font-bold text-red-900">You are about to override this board&rsquo;s rules</h3>
+
+      {activeBlockers.length > 0 && (
+        <div className="text-sm text-red-900">
+          <p>
+            <strong>
+              The card is still blocked by {activeBlockers.length} unresolved{' '}
+              {activeBlockers.length === 1 ? 'blocker' : 'blockers'}
+            </strong>{' '}
+            — moving it does not resolve them:
+          </p>
+          <ul className="list-disc pl-5 mt-1 space-y-0.5">
+            {activeBlockers.map((b) => (
+              <li key={b.id}>
+                {b.reason} <span className="text-red-700 text-xs">(blocked since {new Date(b.startedAt).toLocaleString()})</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {laneMove && (
         <p className="text-sm text-red-900">

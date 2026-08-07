@@ -9,6 +9,7 @@
 import type { PolicyKind, PolicyRef } from '@kan-do/shared';
 import type { Actor } from '../domain/rbac.js';
 import { isBackwards } from '../domain/moveGuard.js';
+import { activeBlockers } from './blockers.js';
 import type { Db } from '../db/index.js';
 import type { AppCtx } from './context.js';
 import { badRequest } from './context.js';
@@ -187,6 +188,7 @@ export async function getMoveRequirements(ctx: AppCtx, actor: Actor, cardId: str
       backwards: false,
       laneMove: false,
       discarding: false,
+      activeBlockers: [],
       requiresReason: false,
       applicable: [],
       checkedIds: [],
@@ -195,7 +197,10 @@ export async function getMoveRequirements(ctx: AppCtx, actor: Actor, cardId: str
     };
   }
 
-  const { leavePolicies, enterPolicies } = await movePolicies(ctx.db, fromCol.id, toCol.id);
+  const [{ leavePolicies, enterPolicies }, blockers] = await Promise.all([
+    movePolicies(ctx.db, fromCol.id, toCol.id),
+    activeBlockers(ctx.db, cardId),
+  ]);
   const applicable = [...leavePolicies, ...enterPolicies];
   const checkedIds = (await checkedPolicyIds(ctx.db, cardId)).filter((id) => applicable.some((p) => p.id === id));
   const source = describe(fromCol);
@@ -209,8 +214,9 @@ export async function getMoveRequirements(ctx: AppCtx, actor: Actor, cardId: str
     backwards,
     laneMove,
     discarding,
+    activeBlockers: blockers,
     /** discards always owe a reason, even when nothing is being overridden */
-    requiresReason: discarding || backwards || laneMove || applicable.length > checkedIds.length,
+    requiresReason: discarding || backwards || laneMove || blockers.length > 0 || applicable.length > checkedIds.length,
     applicable,
     checkedIds,
     fromColumn: source,

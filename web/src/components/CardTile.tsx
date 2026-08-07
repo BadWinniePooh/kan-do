@@ -4,22 +4,34 @@ import type { Card, Category, OwnerRow } from '../types';
 import OwnerBadge from './OwnerBadge';
 
 /**
- * Card face: title, cover picture, owner badges, recurrence + overdue status —
- * all readable at a glance. Overdue = red border + tint + ⚠ text, not color
- * alone. Draggable via mouse/touch and keyboard (dnd-kit sensors).
+ * Card face: title, cover picture, owner badges, recurrence, overdue, blocked
+ * status and move readiness — all readable at a glance, without opening the card
+ * or attempting a move.
+ *
+ * Every state carries text as well as colour: overdue = red left bar + "⚠
+ * overdue", blocked = rose fill and ring + "⛔ blocked", so the two stay
+ * distinguishable on a card that is both. Draggable via mouse/touch/keyboard.
  */
 export default function CardTile({
   card,
   owners,
   coverUrl,
   category,
+  blockers,
+  readiness,
   onOpen,
+  onCheckReadiness,
 }: {
   card: Card;
   owners: OwnerRow[];
   coverUrl: string | null;
   category: Category | null;
+  /** unresolved blockers on this card */
+  blockers: { id: string; reason: string }[];
+  /** before-leaving policies of the card's current column, and how many are ticked */
+  readiness: { total: number; satisfied: number };
   onOpen: () => void;
+  onCheckReadiness: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: card.id,
@@ -27,6 +39,9 @@ export default function CardTile({
   });
 
   const style = transform ? { transform: `translate(${transform.x}px, ${transform.y}px)`, zIndex: 30 } : undefined;
+  const blocked = blockers.length > 0;
+  const outstanding = readiness.total - readiness.satisfied;
+  const stateLabel = [blocked ? 'blocked' : null, card.is_overdue ? 'overdue' : null].filter(Boolean).join(', ');
 
   return (
     <div
@@ -36,7 +51,7 @@ export default function CardTile({
       {...attributes}
       role="button"
       aria-roledescription="Draggable card"
-      aria-label={`Card: ${card.title}${card.is_overdue ? ', overdue' : ''}`}
+      aria-label={`Card: ${card.title}${stateLabel ? `, ${stateLabel}` : ''}`}
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => {
@@ -44,7 +59,7 @@ export default function CardTile({
       }}
       className={`bg-white rounded-lg shadow-sm border border-slate-200 cursor-grab select-none hover:shadow-md hover:-translate-y-px transition-all ${
         isDragging ? 'opacity-60' : ''
-      } ${card.is_overdue ? 'card-overdue' : ''}`}
+      } ${card.is_overdue ? 'card-overdue' : ''} ${blocked ? 'card-blocked' : ''}`}
     >
       {category && (
         // category color accent: top bar + named chip below (color never alone)
@@ -59,11 +74,42 @@ export default function CardTile({
             {category.name}
           </span>
         )}
-        <div className="flex items-center mt-2 gap-1 min-h-[1.75rem]">
+        {blocked && (
+          <p className="text-xs font-semibold text-rose-800 mt-1 flex items-start gap-1" title={blockers.map((b) => b.reason).join('\n')}>
+            <span aria-hidden>⛔</span>
+            <span>
+              blocked
+              {blockers.length > 1 && ` (${blockers.length})`}: {blockers[0]!.reason}
+            </span>
+          </p>
+        )}
+        <div className="flex items-center mt-2 gap-1 min-h-[1.75rem] flex-wrap">
           {card.is_overdue && (
             <span className="text-xs font-semibold text-red-700 flex items-center gap-0.5" aria-hidden>
               ⚠ overdue
             </span>
+          )}
+          {readiness.total > 0 && (
+            // before-leaving readiness at a glance — no move attempt needed
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onCheckReadiness();
+              }}
+              title={
+                outstanding === 0
+                  ? 'All before-leaving policies are ticked. Click to check the destination too.'
+                  : `${outstanding} before-leaving ${outstanding === 1 ? 'policy is' : 'policies are'} outstanding. Click to review.`
+              }
+              aria-label={`Move readiness: ${readiness.satisfied} of ${readiness.total} before-leaving policies satisfied`}
+              className={`text-xs rounded px-1 border ${
+                outstanding === 0 ? 'text-emerald-800 border-emerald-300 bg-emerald-50' : 'text-amber-800 border-amber-300 bg-amber-50'
+              }`}
+            >
+              ☑ {readiness.satisfied}/{readiness.total}
+            </button>
           )}
           {card.recurrence_rule && (
             <span

@@ -3,7 +3,7 @@
  * another. No I/O: the service layer loads the columns, policies and progress
  * (already tenancy-scoped) and feeds them in.
  *
- * Three independent gates:
+ * Four independent gates:
  *  1. policies  — the source column's 'leave' checklist plus the target
  *                 column's 'enter' checklist must all be ticked.
  *  2. direction — a card may not move to an earlier column. Column order is
@@ -12,6 +12,7 @@
  *                 the lane gate governs instead.
  *  3. lane      — moving a card to a different lane is not intended and is
  *                 blocked by default.
+ *  4. blockers  — an unresolved blocker on the card holds it where it is.
  *
  * Discard columns are exempt from the direction gate in BOTH directions:
  *  - moving IN is a terminal exit from the flow ("throw this away"), never a
@@ -23,9 +24,9 @@
  * Every gate can be overridden deliberately; the caller records the override
  * together with the justification the user had to type.
  */
-import type { PolicyRef, MoveBlockedDetails, ColumnSemantic } from '@kan-do/shared';
+import type { PolicyRef, MoveBlockedDetails, ColumnSemantic, BlockerRef } from '@kan-do/shared';
 
-export type { PolicyRef, MoveBlockedDetails };
+export type { PolicyRef, MoveBlockedDetails, BlockerRef };
 
 export interface GuardColumn {
   id: string;
@@ -43,7 +44,9 @@ export interface MoveGuardInput {
   enterPolicies: PolicyRef[];
   /** policy ids already ticked on the card (persisted progress + this attempt) */
   checkedIds: readonly string[];
-  override: { policies?: boolean; backwards?: boolean; lane?: boolean };
+  /** unresolved blockers on the card */
+  activeBlockers: readonly BlockerRef[];
+  override: { policies?: boolean; backwards?: boolean; lane?: boolean; blockers?: boolean };
 }
 
 export interface MoveGuardResult {
@@ -55,10 +58,14 @@ export interface MoveGuardResult {
   discarding: boolean;
   applicable: PolicyRef[];
   unmet: PolicyRef[];
+  /** unresolved blockers holding the card (empty when it is free to move) */
+  activeBlockers: BlockerRef[];
   /** true when the caller must refuse the move */
   blocked: boolean;
   /** policies the caller is knowingly skipping (empty unless overriding) */
   skipped: PolicyRef[];
+  /** blockers the caller is knowingly moving past (empty unless overriding) */
+  bypassedBlockers: BlockerRef[];
   /** an override was actually exercised — write an audit row */
   overrideUsed: boolean;
 }
@@ -94,8 +101,10 @@ export function evaluateMove(input: MoveGuardInput): MoveGuardResult {
       discarding: false,
       applicable: [],
       unmet: [],
+      activeBlockers: [],
       blocked: false,
       skipped: [],
+      bypassedBlockers: [],
       overrideUsed: false,
     };
   }
@@ -107,15 +116,22 @@ export function evaluateMove(input: MoveGuardInput): MoveGuardResult {
   const checked = new Set(input.checkedIds);
   const unmet = applicable.filter((p) => !checked.has(p.id));
 
+  const activeBlockers = [...input.activeBlockers];
+
   const policyBlock = unmet.length > 0 && !input.override.policies;
   const directionBlock = backwards && !input.override.backwards;
   const laneBlock = laneMove && !input.override.lane;
+  const blockerBlock = activeBlockers.length > 0 && !input.override.blockers;
 
   // an override only counts as "used" when it actually let something through:
   // ticking every box then also sending override:true is not an override
   const skipped = unmet.length > 0 && input.override.policies ? unmet : [];
+  const bypassedBlockers = activeBlockers.length > 0 && input.override.blockers ? activeBlockers : [];
   const overrideUsed =
-    skipped.length > 0 || (backwards && Boolean(input.override.backwards)) || (laneMove && Boolean(input.override.lane));
+    skipped.length > 0 ||
+    bypassedBlockers.length > 0 ||
+    (backwards && Boolean(input.override.backwards)) ||
+    (laneMove && Boolean(input.override.lane));
 
   return {
     columnChanged: true,
@@ -124,8 +140,10 @@ export function evaluateMove(input: MoveGuardInput): MoveGuardResult {
     discarding,
     applicable,
     unmet,
-    blocked: policyBlock || directionBlock || laneBlock,
+    activeBlockers,
+    blocked: policyBlock || directionBlock || laneBlock || blockerBlock,
     skipped,
+    bypassedBlockers,
     overrideUsed,
   };
 }
@@ -135,6 +153,7 @@ export function blockedDetails(result: MoveGuardResult, checkedIds: readonly str
   return {
     backwards: result.backwards,
     laneMove: result.laneMove,
+    activeBlockers: result.activeBlockers,
     applicable: result.applicable,
     unmet: result.unmet,
     checkedIds: [...checkedIds],

@@ -20,6 +20,7 @@ import {
 import { get, post, put } from '../api';
 import type { Board } from '../types';
 import { TileSkeleton } from '../components/Loading';
+import FieldBrowser, { type Selection } from '../components/FieldBrowser';
 import { useDismiss } from '../useDismiss';
 
 /* Validated reference palette (dataviz skill). Slots assigned in fixed order. */
@@ -43,6 +44,7 @@ type WidgetId =
   | 'overdueCount'
   | 'throughput'
   | 'outcomes'
+  | 'blockers'
   | 'policyOverrides'
   | 'custom';
 
@@ -60,12 +62,15 @@ const DIMENSIONS = [
   'discardReason',
   'overrideReason',
   'overriddenPolicy',
+  'blockStatus',
+  'blockerReason',
 ] as const;
-const METRICS = ['count', 'leadTimeMs', 'cycleTimeMs', 'waitingTimeMs', 'timeInColumnMs', 'overrideCount'] as const;
+/** Type source only — which metrics a widget uses is chosen in the data table. */
+type METRICS = ['count', 'leadTimeMs', 'cycleTimeMs', 'waitingTimeMs', 'timeInColumnMs', 'overrideCount', 'blockerCount', 'blockedTimeMs'];
 const AGGREGATIONS = ['count', 'sum', 'avg', 'min', 'max', 'median'] as const;
 
 type Dimension = (typeof DIMENSIONS)[number];
-type Metric = (typeof METRICS)[number];
+type Metric = METRICS[number];
 type Aggregation = (typeof AGGREGATIONS)[number];
 type Viz = 'table' | 'bar' | 'line' | 'area' | 'pie';
 
@@ -109,6 +114,14 @@ interface Metrics {
   overdueCount: number;
   /** completion is "done" only — discarded cards are finished, not successful */
   outcomes: { completedCount: number; discardedCount: number; activeCount: number; completionRate: number | null };
+  blockers: {
+    activeCount: number;
+    blockedCardCount: number;
+    totalCount: number;
+    everBlockedCardCount: number;
+    meanBlockedMs: number | null;
+    totalBlockedMs: number;
+  };
   overrides: {
     total: number;
     backwardsMoves: number;
@@ -144,6 +157,7 @@ const BUILTIN_WIDGETS: { id: Exclude<WidgetId, 'custom'>; label: string }[] = [
   { id: 'perColumn', label: 'Time in work columns' },
   { id: 'throughput', label: 'Throughput (done/week)' },
   { id: 'outcomes', label: 'Completed vs discarded' },
+  { id: 'blockers', label: 'Blocked cards' },
   { id: 'policyOverrides', label: 'Rule overrides' },
 ];
 
@@ -169,6 +183,8 @@ const DIM_LABELS: Record<string, string> = {
   discardReason: 'Discard reason',
   overrideReason: 'Override reason',
   overriddenPolicy: 'Overridden rule',
+  blockStatus: 'Block status',
+  blockerReason: 'Blocker reason',
 };
 
 /** Extra context for dimensions whose meaning is not obvious from the label. */
@@ -179,7 +195,9 @@ const DIM_HINTS: Record<string, string> = {
   outcome: 'Done means completed successfully; discarded means finished but reverted.',
   discardReason: 'The justification typed when the card was discarded.',
   overrideReason: 'The justification typed when a rule was overridden — one row per override.',
-  overriddenPolicy: 'Which rule was bypassed: a named policy, a backwards move, or a cross-lane move.',
+  overriddenPolicy: 'Which rule was bypassed: a named policy, a backwards move, a cross-lane move, or an active blocker.',
+  blockStatus: 'Blocked right now, blocked at some point, or never blocked.',
+  blockerReason: 'Why a card was blocked — one row per blocker it collected.',
 };
 const METRIC_LABELS: Record<string, string> = {
   count: 'Card count',
@@ -187,7 +205,9 @@ const METRIC_LABELS: Record<string, string> = {
   cycleTimeMs: 'Cycle time',
   waitingTimeMs: 'Waiting time',
   timeInColumnMs: 'Time in current column',
-  overrideCount: 'Policy overrides',
+  overrideCount: 'Rule overrides',
+  blockerCount: 'Blockers',
+  blockedTimeMs: 'Blocked time',
 };
 
 /** A burnup needs two differently-dimensioned cumulative counts — preset it. */
@@ -209,8 +229,9 @@ function fmtDuration(ms: number | null): string {
   return `${(h / 24).toFixed(1)} d`;
 }
 
+const COUNT_METRICS = new Set(['count', 'overrideCount', 'blockerCount']);
 const fmtValue = (metric: string, v: number | null) =>
-  v === null ? '—' : metric === 'count' || metric === 'overrideCount' ? String(Math.round(v)) : fmtDuration(v);
+  v === null ? '—' : COUNT_METRICS.has(metric) ? String(Math.round(v)) : fmtDuration(v);
 
 export default function DashboardPage() {
   const qc = useQueryClient();
@@ -453,16 +474,42 @@ function WidgetBuilder({
   const previewDef = useDebounced(def, 350);
 
   const setSeries = (next: SeriesDef[]) => set({ series: next });
-  const enableMulti = () =>
-    set({
-      viz: def.viz === 'pie' || def.viz === 'table' ? 'line' : def.viz,
-      dimensions: [def.dimensions[0]!],
-      series: [
-        { label: METRIC_LABELS[def.metric] ?? 'Series 1', metric: def.metric, aggregation: def.aggregation },
-        { label: 'Card count', metric: 'count', aggregation: 'count' },
-      ],
-    });
 
+  /**
+   * Turn a spreadsheet selection back into a widget definition. Picking a
+   * second number column promotes the widget to multi-series; dropping back to
+   * one demotes it. Per-series tuning (label, plot-over, running total) is
+   * carried over for metrics that survive the change, so refining a burnup in
+   * the series editor is not undone by touching the table.
+   */
+  const applySelection = (sel: Selection) => {
+    const dimensions = sel.groups as Dimension[];
+    const measures = sel.measures as Metric[];
+    if (measures.length > 1) {
+      const existing = def.series ?? [];
+      set({
+        dimensions: [dimensions[0]!],
+        viz: def.viz === 'pie' || def.viz === 'table' ? 'line' : def.viz,
+        series: measures.map(
+          (m) =>
+            existing.find((s) => s.metric === m) ?? {
+              label: METRIC_LABELS[m] ?? m,
+              metric: m,
+              aggregation: m === 'count' ? 'count' : 'avg',
+            },
+        ),
+      });
+      return;
+    }
+    const metric = measures[0] ?? 'count';
+    set({
+      dimensions,
+      metric,
+      aggregation: metric === 'count' ? 'count' : def.aggregation === 'count' ? 'avg' : def.aggregation,
+      series: undefined,
+      omitKeys: undefined,
+    });
+  };
   return (
     <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center pt-10 px-4" onClick={onClose}>
       <div
@@ -483,102 +530,49 @@ function WidgetBuilder({
             className="mt-1 w-full border rounded px-2 py-1"
           />
         </label>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block text-sm">
-            {multi ? 'Axis (group by)' : 'Group by'}
+        {/*
+          Data selection is a spreadsheet, not a form: the user sees the real
+          rows behind the widget and clicks the columns to use. Text columns
+          group, number columns get measured.
+        */}
+        <FieldBrowser
+          boardId={boardId}
+          maxGroups={multi ? 1 : 2}
+          selection={{
+            groups: def.dimensions,
+            measures: multi ? def.series!.map((s) => s.metric) : [def.metric],
+          }}
+          onChange={(sel) => applySelection(sel)}
+        />
+
+        {!multi && (
+          <label className="block text-sm max-w-xs">
+            Aggregate {METRIC_LABELS[def.metric]} by
             <select
-              value={def.dimensions[0]}
-              onChange={(e) => set({ dimensions: [e.target.value as Dimension, ...(def.dimensions[1] ? [def.dimensions[1]!] : [])] })}
-              className="mt-1 w-full border rounded px-2 py-1"
+              value={def.aggregation}
+              disabled={countMode}
+              onChange={(e) => set({ aggregation: e.target.value as Aggregation })}
+              className="mt-1 w-full border rounded px-2 py-1 disabled:opacity-50"
+              title={countMode ? 'Card count is always a count' : undefined}
             >
-              {DIMENSIONS.map((d) => (
-                <option key={d} value={d} title={DIM_HINTS[d]}>
-                  {DIM_LABELS[d]}
+              {AGGREGATIONS.filter((a) => a !== 'count').map((a) => (
+                <option key={a} value={a}>
+                  {a}
                 </option>
               ))}
+              {countMode && <option value="count">count</option>}
             </select>
           </label>
-          {!multi && (
-            <label className="block text-sm">
-              Then by (optional)
-              <select
-                value={def.dimensions[1] ?? ''}
-                onChange={(e) => set({ dimensions: e.target.value ? [def.dimensions[0]!, e.target.value as Dimension] : [def.dimensions[0]!] })}
-                className="mt-1 w-full border rounded px-2 py-1"
-              >
-                <option value="">—</option>
-                {DIMENSIONS.filter((d) => d !== def.dimensions[0]).map((d) => (
-                  <option key={d} value={d} title={DIM_HINTS[d]}>
-                    {DIM_LABELS[d]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {!multi && (
-            <>
-              <label className="block text-sm">
-                Metric
-                <select
-                  value={def.metric}
-                  onChange={(e) => {
-                    const metric = e.target.value as Metric;
-                    set({ metric, aggregation: metric === 'count' ? 'count' : def.aggregation === 'count' ? 'avg' : def.aggregation });
-                  }}
-                  className="mt-1 w-full border rounded px-2 py-1"
-                >
-                  {METRICS.map((m) => (
-                    <option key={m} value={m}>
-                      {METRIC_LABELS[m]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-sm">
-                Aggregation
-                <select
-                  value={def.aggregation}
-                  disabled={countMode}
-                  onChange={(e) => set({ aggregation: e.target.value as Aggregation })}
-                  className="mt-1 w-full border rounded px-2 py-1 disabled:opacity-50"
-                  title={countMode ? 'Card count is always a count' : undefined}
-                >
-                  {AGGREGATIONS.filter((a) => a !== 'count').map((a) => (
-                    <option key={a} value={a}>
-                      {a}
-                    </option>
-                  ))}
-                  {countMode && <option value="count">count</option>}
-                </select>
-              </label>
-            </>
-          )}
-        </div>
+        )}
 
         <fieldset className="text-sm border-t pt-3">
-          <legend className="sr-only">Series</legend>
+          <legend className="sr-only">Series options</legend>
           <div className="flex items-center gap-3 flex-wrap">
-            <span className="font-medium">Series</span>
-            <div className="flex gap-2" role="radiogroup" aria-label="Number of series">
-              <button
-                type="button"
-                role="radio"
-                aria-checked={!multi}
-                onClick={() => set({ series: undefined, omitKeys: undefined })}
-                className={`border rounded px-3 py-1 ${!multi ? 'bg-slate-800 text-white' : 'bg-white'}`}
-              >
-                one
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={multi}
-                onClick={() => (multi ? undefined : enableMulti())}
-                className={`border rounded px-3 py-1 ${multi ? 'bg-slate-800 text-white' : 'bg-white'}`}
-              >
-                several on one chart
-              </button>
-            </div>
+            <span className="text-xs text-gray-500">
+              {multi
+                ? `${def.series!.length} measures plotted together — tune each below.`
+                : 'Pick a second number column above to plot measures together.'}
+            </span>
             <button
               type="button"
               onClick={() => set({ ...BURNUP_PRESET, title: def.title || 'Burnup' })}
@@ -685,23 +679,11 @@ function SeriesEditor({
               className="mt-0.5 w-full border rounded px-2 py-1 text-sm"
             />
           </label>
-          <label className="col-span-3 text-xs">
-            Metric
-            <select
-              value={s.metric}
-              onChange={(e) => {
-                const metric = e.target.value as Metric;
-                patch(i, { metric, aggregation: metric === 'count' ? 'count' : s.aggregation === 'count' ? 'avg' : s.aggregation });
-              }}
-              className="mt-0.5 w-full border rounded px-1 py-1 text-sm"
-            >
-              {METRICS.map((m) => (
-                <option key={m} value={m}>
-                  {METRIC_LABELS[m]}
-                </option>
-              ))}
-            </select>
-          </label>
+          {/* which metric is chosen in the data table above, not here */}
+          <span className="col-span-3 text-xs self-center">
+            <span className="block text-gray-500">Measures</span>
+            <span className="block font-medium">{METRIC_LABELS[s.metric] ?? s.metric}</span>
+          </span>
           <label className="col-span-2 text-xs">
             Aggregation
             <select
@@ -762,14 +744,7 @@ function SeriesEditor({
         </div>
       ))}
       <div className="flex items-center gap-3 flex-wrap">
-        <button
-          type="button"
-          disabled={series.length >= 6}
-          onClick={() => onChange([...series, { label: `Series ${series.length + 1}`, metric: 'count', aggregation: 'count' }])}
-          className="text-xs border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100 disabled:opacity-40"
-        >
-          + Add series
-        </button>
+        <span className="text-xs text-gray-500">Add or drop a series by clicking a number column in the table above.</span>
         <label className="flex items-center gap-2 text-xs">
           <input
             type="checkbox"
@@ -1161,6 +1136,30 @@ function Widget({
           value={o.completionRate === null ? '—' : `${Math.round(o.completionRate * 100)}%`}
           sub={`${o.completedCount} completed · ${o.discardedCount} discarded · ${o.activeCount} still active — share of finished cards that actually succeeded`}
           accent={o.completionRate !== null && o.completionRate < 0.5 ? C.critical : undefined}
+        />
+      );
+    }
+    case 'blockers': {
+      // how often work stalls, and for how long — the two questions a blocker
+      // report has to answer
+      const b = metrics.blockers ?? {
+        activeCount: 0,
+        blockedCardCount: 0,
+        totalCount: 0,
+        everBlockedCardCount: 0,
+        meanBlockedMs: null,
+        totalBlockedMs: 0,
+      };
+      return (
+        <StatTile
+          label="Blocked cards"
+          value={String(b.blockedCardCount)}
+          sub={
+            b.totalCount === 0
+              ? 'nothing has ever been blocked on this board'
+              : `blocked right now · ${b.everBlockedCardCount} card(s) blocked at some point across ${b.totalCount} blocker(s) · ${fmtDuration(b.meanBlockedMs)} mean stall`
+          }
+          accent={b.blockedCardCount > 0 ? C.critical : undefined}
         />
       );
     }

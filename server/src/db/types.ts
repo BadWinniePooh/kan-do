@@ -103,6 +103,9 @@ export interface CardMoveOverridesTable {
   lane_move: Generated<boolean>;
   from_lane_id: string | null;
   to_lane_id: string | null;
+  /** the card had an active blocker and was moved anyway */
+  blocked: Generated<boolean>;
+  blockers: unknown;
   skipped_policies: unknown;
   reason: string | null;
   at: Created;
@@ -162,6 +165,29 @@ export interface CardOwnersTable {
   kind: 'user' | 'external';
   user_id: string | null;
   external_owner_id: string | null;
+}
+
+/** A reason a card cannot progress. Dependent on its card — cascade deleted. */
+export interface CardBlockersTable {
+  id: Generated<string>;
+  card_id: string;
+  reason: string;
+  started_at: Generated<Date>;
+  /** null while the blocker is still active and holding the card */
+  ended_at: Date | null;
+  created_by: string | null;
+  resolved_by: string | null;
+  created_at: Created;
+  updated_at: Updated;
+}
+
+export interface CardBlockerCommentsTable {
+  id: Generated<string>;
+  blocker_id: string;
+  author_id: string | null;
+  markdown: string;
+  created_at: Created;
+  updated_at: Updated;
 }
 
 export interface NotesTable {
@@ -251,6 +277,8 @@ export interface DB {
   external_owners: ExternalOwnersTable;
   cards: CardsTable;
   card_owners: CardOwnersTable;
+  card_blockers: CardBlockersTable;
+  card_blocker_comments: CardBlockerCommentsTable;
   notes: NotesTable;
   attachments: AttachmentsTable;
   card_transitions: CardTransitionsTable;

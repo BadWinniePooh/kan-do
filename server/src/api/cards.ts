@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppCtx } from '../services/context.js';
 import * as cards from '../services/cards.js';
 import * as policies from '../services/policies.js';
+import * as blockers from '../services/blockers.js';
 import { requireAuth } from '../auth/plugin.js';
 
 const recurrenceSchema = z.object({
@@ -73,6 +74,7 @@ export function cardRoutes(ctx: AppCtx) {
               policies: z.boolean().optional(),
               backwards: z.boolean().optional(),
               lane: z.boolean().optional(),
+              blockers: z.boolean().optional(),
             })
             .optional(),
         })
@@ -133,6 +135,63 @@ export function cardRoutes(ctx: AppCtx) {
     app.delete('/:cardId/notes/:noteId', async (req) => {
       const { cardId, noteId } = req.params as { cardId: string; noteId: string };
       await cards.deleteNote(ctx, req.actor!, cardId, noteId);
+      return { ok: true };
+    });
+
+    // ---- blockers: dependent records; every route is reached through the card,
+    // so board access is the only permission involved ----
+    app.get('/:cardId/blockers', async (req) => {
+      const { cardId } = req.params as { cardId: string };
+      return blockers.listBlockers(ctx, req.actor!, cardId);
+    });
+
+    app.post('/:cardId/blockers', async (req) => {
+      const { cardId } = req.params as { cardId: string };
+      const body = z
+        .object({ reason: z.string().min(1).max(1000), startedAt: z.string().datetime().optional() })
+        .parse(req.body);
+      return blockers.createBlocker(ctx, req.actor!, cardId, body);
+    });
+
+    app.patch('/:cardId/blockers/:blockerId', async (req) => {
+      const { cardId, blockerId } = req.params as { cardId: string; blockerId: string };
+      const body = z
+        .object({
+          reason: z.string().min(1).max(1000).optional(),
+          startedAt: z.string().datetime().optional(),
+          /** null reopens the blocker; a timestamp resolves it */
+          endedAt: z.string().datetime().nullable().optional(),
+        })
+        .parse(req.body);
+      return blockers.updateBlocker(ctx, req.actor!, cardId, blockerId, body);
+    });
+
+    app.post('/:cardId/blockers/:blockerId/resolve', async (req) => {
+      const { cardId, blockerId } = req.params as { cardId: string; blockerId: string };
+      return blockers.resolveBlocker(ctx, req.actor!, cardId, blockerId);
+    });
+
+    app.delete('/:cardId/blockers/:blockerId', async (req) => {
+      const { cardId, blockerId } = req.params as { cardId: string; blockerId: string };
+      await blockers.deleteBlocker(ctx, req.actor!, cardId, blockerId);
+      return { ok: true };
+    });
+
+    app.post('/:cardId/blockers/:blockerId/comments', async (req) => {
+      const { cardId, blockerId } = req.params as { cardId: string; blockerId: string };
+      const body = z.object({ markdown: z.string().min(1).max(100000) }).parse(req.body);
+      return blockers.addComment(ctx, req.actor!, cardId, blockerId, body.markdown);
+    });
+
+    app.patch('/:cardId/blockers/:blockerId/comments/:commentId', async (req) => {
+      const { cardId, blockerId, commentId } = req.params as { cardId: string; blockerId: string; commentId: string };
+      const body = z.object({ markdown: z.string().min(1).max(100000) }).parse(req.body);
+      return blockers.updateComment(ctx, req.actor!, cardId, blockerId, commentId, body.markdown);
+    });
+
+    app.delete('/:cardId/blockers/:blockerId/comments/:commentId', async (req) => {
+      const { cardId, blockerId, commentId } = req.params as { cardId: string; blockerId: string; commentId: string };
+      await blockers.deleteComment(ctx, req.actor!, cardId, blockerId, commentId);
       return { ok: true };
     });
   };

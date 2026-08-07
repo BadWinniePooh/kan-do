@@ -8,6 +8,7 @@ import OwnerBadge from './OwnerBadge';
 import RecurrenceBuilder from './RecurrenceBuilder';
 import OwnerPicker from './OwnerPicker';
 import CardAuditView from './CardAudit';
+import Blockers from './Blockers';
 import { Spinner } from './Loading';
 
 export default function CardModal({ cardId, board, onClose }: { cardId: string; board: BoardDetail; onClose: () => void }) {
@@ -169,6 +170,8 @@ export default function CardModal({ cardId, board, onClose }: { cardId: string; 
           </section>
 
           <DescriptionEditor value={card.description ?? ''} onSave={(d) => update.mutate({ description: d || null })} />
+
+          <Blockers cardId={cardId} onChanged={invalidate} />
 
           <Gallery data={data} cardId={cardId} onChanged={invalidate} />
 

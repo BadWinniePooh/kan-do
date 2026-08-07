@@ -21,6 +21,7 @@ import CardModal from '../components/CardModal';
 import ColumnEditor from '../components/ColumnEditor';
 import BoardSettings from '../components/BoardSettings';
 import MovePolicyDialog from '../components/MovePolicyDialog';
+import CardReadiness from '../components/CardReadiness';
 import { BoardSkeleton } from '../components/Loading';
 import { useDismiss } from '../useDismiss';
 
@@ -46,6 +47,7 @@ export default function BoardPage() {
   // swimlanes has a separate drop cell per pair
   const [newCardAt, setNewCardAt] = useState<{ columnId: string; laneId: string } | null>(null);
   const [gatedMove, setGatedMove] = useState<{ card: Card; laneId: string; requirements: MoveRequirements } | null>(null);
+  const [readinessCard, setReadinessCard] = useState<Card | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -73,6 +75,29 @@ export default function BoardPage() {
     return m;
   }, [data?.policies]);
 
+  const blockersByCard = useMemo(() => {
+    const m = new Map<string, { id: string; reason: string }[]>();
+    for (const b of data?.blockers ?? []) {
+      const list = m.get(b.card_id) ?? [];
+      list.push({ id: b.id, reason: b.reason });
+      m.set(b.card_id, list);
+    }
+    return m;
+  }, [data?.blockers]);
+
+  /**
+   * Move readiness per card, computed from data the board already has: how many
+   * of the current column's before-leaving policies are ticked. Lets a user see
+   * whether a card is ready before they ever pull it.
+   */
+  const readinessOf = useMemo(() => {
+    const ticked = new Set((data?.policyProgress ?? []).map((p) => `${p.card_id}:${p.policy_id}`));
+    return (card: Card) => {
+      const leaving = (policiesByColumn.get(card.column_id) ?? []).filter((p) => p.kind === 'leave');
+      return { total: leaving.length, satisfied: leaving.filter((p) => ticked.has(`${card.id}:${p.id}`)).length };
+    };
+  }, [data?.policyProgress, policiesByColumn]);
+
   const move = useMutation({
     mutationFn: (v: { cardId: string; toColumnId: string; laneId: string }) =>
       post(`/api/cards/${v.cardId}/move`, { toColumnId: v.toColumnId, laneId: v.laneId, position: Date.now() }),
@@ -99,7 +124,13 @@ export default function BoardPage() {
       setMoveError(`Move failed: ${err instanceof Error ? err.message : 'unknown error'}. The board is unchanged.`);
       return;
     }
-    if (requirements.backwards || requirements.laneMove || requirements.discarding || requirements.applicable.length > 0) {
+    if (
+      requirements.backwards ||
+      requirements.laneMove ||
+      requirements.discarding ||
+      requirements.activeBlockers.length > 0 ||
+      requirements.applicable.length > 0
+    ) {
       setGatedMove({ card, laneId: target.laneId, requirements });
       return;
     }
@@ -209,7 +240,10 @@ export default function BoardPage() {
                             owners={ownersByCard.get(card.id) ?? []}
                             coverUrl={data.covers[card.id] ?? null}
                             category={data.categories.find((cat) => cat.id === card.category_id) ?? null}
+                            blockers={blockersByCard.get(card.id) ?? []}
+                            readiness={readinessOf(card)}
                             onOpen={() => setOpenCard(card.id)}
+                            onCheckReadiness={() => setReadinessCard(card)}
                           />
                         ))}
                     </div>
@@ -251,6 +285,17 @@ export default function BoardPage() {
             setGatedMove(null);
             void qc.invalidateQueries({ queryKey: ['board', boardId] });
           }}
+        />
+      )}
+
+      {readinessCard && (
+        <CardReadiness
+          cardId={readinessCard.id}
+          cardTitle={readinessCard.title}
+          currentColumnId={readinessCard.column_id}
+          laneColumns={data.columns.filter((c) => c.lane_id === readinessCard.lane_id)}
+          onClose={() => setReadinessCard(null)}
+          onSaved={() => void qc.invalidateQueries({ queryKey: ['board', boardId] })}
         />
       )}
 

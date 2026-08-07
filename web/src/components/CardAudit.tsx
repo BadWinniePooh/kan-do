@@ -50,6 +50,28 @@ function TimelineEntry({ entry }: { entry: AuditEntry }) {
     );
   }
 
+  if (entry.kind === 'blocked') {
+    return (
+      <Item dot="bg-rose-600" when={when}>
+        <p className="text-sm text-rose-900">
+          ⛔ <strong>{who}</strong> blocked this card.
+        </p>
+        <Reason text={entry.reason} label="Blocker" />
+      </Item>
+    );
+  }
+
+  if (entry.kind === 'unblocked') {
+    return (
+      <Item dot="bg-emerald-500" when={when}>
+        <p className="text-sm">
+          <strong>{who}</strong> resolved the blocker.
+        </p>
+        <Reason text={entry.reason} label="Was blocked by" />
+      </Item>
+    );
+  }
+
   if (entry.kind === 'moved') {
     return (
       <Item dot={entry.discarded ? 'bg-stone-500' : 'bg-blue-500'} when={when}>
@@ -72,6 +94,8 @@ function TimelineEntry({ entry }: { entry: AuditEntry }) {
   const broken = [
     entry.laneMove && 'moved the card to another lane',
     entry.backwards && 'moved the card backwards',
+    entry.bypassedBlockers.length > 0 &&
+      `moved it past ${entry.bypassedBlockers.length} active ${entry.bypassedBlockers.length === 1 ? 'blocker' : 'blockers'}`,
     entry.skipped.length > 0 && `skipped ${entry.skipped.length} ${entry.skipped.length === 1 ? 'policy' : 'policies'}`,
   ].filter(Boolean) as string[];
 
@@ -80,6 +104,15 @@ function TimelineEntry({ entry }: { entry: AuditEntry }) {
       <p className="text-sm text-red-900">
         ⚠ <strong>{who}</strong> overrode the rules: {broken.join(', ')}.
       </p>
+      {entry.bypassedBlockers.length > 0 && (
+        <ul className="list-disc pl-5 mt-1 text-sm text-red-900">
+          {entry.bypassedBlockers.map((b, i) => (
+            <li key={i}>
+              {b.reason} <span className="text-red-700 text-xs">(blocker was still active)</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {entry.skipped.length > 0 && (
         <ul className="list-disc pl-5 mt-1 text-sm text-red-900">
           {entry.skipped.map((s, i) => (

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { applicablePolicies, evaluateMove, isBackwards, requiresReason, type GuardColumn, type PolicyRef } from './moveGuard.js';
+import {
+  applicablePolicies,
+  evaluateMove,
+  isBackwards,
+  requiresReason,
+  type BlockerRef,
+  type GuardColumn,
+  type PolicyRef,
+} from './moveGuard.js';
 
 const policy = (id: string, kind: 'enter' | 'leave', columnId = 'c1'): PolicyRef => ({
   id,
@@ -22,6 +30,7 @@ const base = {
   leavePolicies: [] as PolicyRef[],
   enterPolicies: [] as PolicyRef[],
   checkedIds: [] as string[],
+  activeBlockers: [] as BlockerRef[],
   override: {},
 };
 
@@ -240,5 +249,69 @@ describe('requiresReason', () => {
 
   it('is false for an ordinary forward move', () => {
     expect(requiresReason(evaluateMove(base))).toBe(false);
+  });
+});
+
+describe('blocker gate', () => {
+  const blocker = (id: string, reason = `reason ${id}`): BlockerRef => ({ id, reason, startedAt: '2026-08-01T00:00:00.000Z' });
+
+  it('an active blocker holds the card in place', () => {
+    const r = evaluateMove({ ...base, activeBlockers: [blocker('b1')] });
+    expect(r.blocked).toBe(true);
+    expect(r.activeBlockers.map((b) => b.id)).toEqual(['b1']);
+    expect(r.overrideUsed).toBe(false);
+  });
+
+  it('no active blockers leaves the move alone', () => {
+    expect(evaluateMove({ ...base, activeBlockers: [] }).blocked).toBe(false);
+  });
+
+  it('the blocker override passes the move and records what was bypassed', () => {
+    const r = evaluateMove({ ...base, activeBlockers: [blocker('b1'), blocker('b2')], override: { blockers: true } });
+    expect(r.blocked).toBe(false);
+    expect(r.bypassedBlockers.map((b) => b.id)).toEqual(['b1', 'b2']);
+    expect(r.overrideUsed).toBe(true);
+  });
+
+  it('a policy override does not unlock a blocked card', () => {
+    const r = evaluateMove({
+      ...base,
+      leavePolicies: [policy('l1', 'leave')],
+      activeBlockers: [blocker('b1')],
+      override: { policies: true },
+    });
+    expect(r.blocked).toBe(true);
+  });
+
+  it('overriding blockers on a card that has none is not an override', () => {
+    const r = evaluateMove({ ...base, override: { blockers: true } });
+    expect(r.overrideUsed).toBe(false);
+    expect(r.bypassedBlockers).toEqual([]);
+  });
+
+  it('a blocked card still owes its policies', () => {
+    const r = evaluateMove({
+      ...base,
+      leavePolicies: [policy('l1', 'leave')],
+      activeBlockers: [blocker('b1')],
+      override: { blockers: true },
+    });
+    expect(r.blocked).toBe(true);
+    expect(r.unmet.map((p) => p.id)).toEqual(['l1']);
+  });
+
+  it('bypassing a blocker requires a reason', () => {
+    const r = evaluateMove({ ...base, activeBlockers: [blocker('b1')], override: { blockers: true } });
+    expect(requiresReason(r)).toBe(true);
+  });
+
+  it('a same-column reorder is not held by a blocker', () => {
+    const r = evaluateMove({
+      ...base,
+      fromColumn: col({ id: 'a', position: 2 }),
+      toColumn: col({ id: 'a', position: 2 }),
+      activeBlockers: [blocker('b1')],
+    });
+    expect(r.blocked).toBe(false);
   });
 });
