@@ -21,7 +21,7 @@ jobs:
         run: pnpm lint
       - name: Typecheck & build
         run: pnpm build
-      - name: Unit tests (domain: recurrence, metrics, RBAC)
+      - name: "Unit tests (domain: recurrence, metrics, RBAC)"
         run: pnpm --filter @kan-do/server test
 
   integration:
