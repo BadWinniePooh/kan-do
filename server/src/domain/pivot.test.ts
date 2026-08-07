@@ -12,7 +12,11 @@ const fact = (over: Partial<CardFact>): CardFact => ({
   recurrenceStatus: 'open',
   createdMonth: '2026-07',
   closedMonth: 'Not done',
+  outcome: 'Active',
   overrideStatus: 'clean',
+  discardReason: 'Not discarded',
+  overrideReasons: [],
+  overriddenPolicies: [],
   leadTimeMs: null,
   cycleTimeMs: null,
   waitingTimeMs: null,
@@ -202,5 +206,74 @@ describe('multiPivot', () => {
 
   it('rejects an empty series list', () => {
     expect(() => multiPivot([fact({})], { dimension: 'column', series: [] })).toThrow();
+  });
+});
+
+describe('outcome and reason dimensions', () => {
+  it('discarded cards are a separate outcome from done, never a completion', () => {
+    const rows = pivot(
+      [
+        fact({ outcome: 'Done', closedMonth: '2026-03' }),
+        fact({ outcome: 'Discarded', closedMonth: 'Not done' }),
+        fact({ outcome: 'Active' }),
+      ],
+      { dimensions: ['outcome'], metric: 'count', aggregation: 'count' },
+    );
+    expect(rows.map((r) => [r.keys[0], r.value])).toEqual([
+      ['Active', 1],
+      ['Discarded', 1],
+      ['Done', 1],
+    ]);
+    // the discarded card contributes no completion month
+    const closed = pivot(
+      [fact({ outcome: 'Discarded', closedMonth: 'Not done' })],
+      { dimensions: ['closedMonth'], metric: 'count', aggregation: 'count' },
+    );
+    expect(closed[0]!.keys).toEqual(['Not done']);
+  });
+
+  it('groups discarded cards by their reason', () => {
+    const rows = pivot(
+      [
+        fact({ outcome: 'Discarded', discardReason: 'Customer withdrew' }),
+        fact({ outcome: 'Discarded', discardReason: 'Customer withdrew' }),
+        fact({ outcome: 'Discarded', discardReason: 'Duplicate' }),
+        fact({}),
+      ],
+      { dimensions: ['discardReason'], metric: 'count', aggregation: 'count' },
+    );
+    expect(rows.map((r) => [r.keys[0], r.value])).toEqual([
+      ['Customer withdrew', 2],
+      ['Duplicate', 1],
+      ['Not discarded', 1],
+    ]);
+  });
+
+  it('a card with several overrides explodes into one row per override', () => {
+    const rows = pivot(
+      [fact({ overriddenPolicies: ['Reviewed', 'Backwards move'], overrideCount: 2 })],
+      { dimensions: ['overriddenPolicy'], metric: 'count', aggregation: 'count' },
+    );
+    expect(rows.map((r) => r.keys[0])).toEqual(['Backwards move', 'Reviewed']);
+  });
+
+  it('which rule was overridden, crossed with why', () => {
+    const rows = pivot(
+      [
+        fact({ overriddenPolicies: ['Cross-lane move'], overrideReasons: ['escalation'] }),
+        fact({ overriddenPolicies: ['Cross-lane move'], overrideReasons: ['escalation'] }),
+        fact({ overriddenPolicies: ['Backwards move'], overrideReasons: ['reopened after bug'] }),
+      ],
+      { dimensions: ['overriddenPolicy', 'overrideReason'], metric: 'count', aggregation: 'count' },
+    );
+    expect(rows.map((r) => [...r.keys, r.value])).toEqual([
+      ['Backwards move', 'reopened after bug', 1],
+      ['Cross-lane move', 'escalation', 2],
+    ]);
+  });
+
+  it('cards with no override fall into a single "No override" bucket', () => {
+    const rows = pivot([fact({}), fact({})], { dimensions: ['overrideReason'], metric: 'count', aggregation: 'count' });
+    expect(rows).toEqual([{ keys: ['No override'], value: 2, n: 2 }]);
   });
 });

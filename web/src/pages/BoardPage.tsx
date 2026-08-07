@@ -44,8 +44,8 @@ export default function BoardPage() {
   const [moveError, setMoveError] = useState<string | null>(null);
   // the quick-add form belongs to one column AND one lane — a board with
   // swimlanes has a separate drop cell per pair
-  const [newCardAt, setNewCardAt] = useState<{ columnId: string; laneId: string | null } | null>(null);
-  const [gatedMove, setGatedMove] = useState<{ card: Card; laneId: string | null; requirements: MoveRequirements } | null>(null);
+  const [newCardAt, setNewCardAt] = useState<{ columnId: string; laneId: string } | null>(null);
+  const [gatedMove, setGatedMove] = useState<{ card: Card; laneId: string; requirements: MoveRequirements } | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -74,7 +74,7 @@ export default function BoardPage() {
   }, [data?.policies]);
 
   const move = useMutation({
-    mutationFn: (v: { cardId: string; toColumnId: string; laneId: string | null }) =>
+    mutationFn: (v: { cardId: string; toColumnId: string; laneId: string }) =>
       post(`/api/cards/${v.cardId}/move`, { toColumnId: v.toColumnId, laneId: v.laneId, position: Date.now() }),
     onError: (e) => setMoveError(`Move failed: ${e.message}. The board has been restored.`),
     onSettled: () => qc.invalidateQueries({ queryKey: ['board', boardId] }),
@@ -83,28 +83,25 @@ export default function BoardPage() {
   const onDragEnd = async (e: DragEndEvent) => {
     setDragging(null);
     const card = e.active.data.current?.card as Card | undefined;
-    const target = e.over?.data.current as { columnId: string; laneId: string | null } | undefined;
+    const target = e.over?.data.current as { columnId: string; laneId: string } | undefined;
     if (!card || !target) return;
-    if (card.column_id === target.columnId && card.lane_id === target.laneId) return;
+    if (card.column_id === target.columnId) return;
     setMoveError(null);
 
-    // A column change may be gated by policies or the no-backwards rule. Ask
-    // first so the checklist is presented up front rather than after a refusal;
-    // a same-column reorder and an ungated move skip straight through.
-    if (card.column_id !== target.columnId) {
-      let requirements: MoveRequirements;
-      try {
-        requirements = await get<MoveRequirements>(
-          `/api/cards/${card.id}/move-requirements?toColumnId=${target.columnId}`,
-        );
-      } catch (err) {
-        setMoveError(`Move failed: ${err instanceof Error ? err.message : 'unknown error'}. The board is unchanged.`);
-        return;
-      }
-      if (requirements.backwards || requirements.applicable.length > 0) {
-        setGatedMove({ card, laneId: target.laneId, requirements });
-        return;
-      }
+    // A column change may be gated by policies, the no-backwards rule, the
+    // no-lane-change rule, or need a discard reason. Ask first so the dialog is
+    // presented up front rather than after a refusal; ungated moves go straight
+    // through.
+    let requirements: MoveRequirements;
+    try {
+      requirements = await get<MoveRequirements>(`/api/cards/${card.id}/move-requirements?toColumnId=${target.columnId}`);
+    } catch (err) {
+      setMoveError(`Move failed: ${err instanceof Error ? err.message : 'unknown error'}. The board is unchanged.`);
+      return;
+    }
+    if (requirements.backwards || requirements.laneMove || requirements.discarding || requirements.applicable.length > 0) {
+      setGatedMove({ card, laneId: target.laneId, requirements });
+      return;
     }
 
     // optimistic: card appears in the target instantly; server confirms or we roll back
@@ -124,19 +121,21 @@ export default function BoardPage() {
   if (isLoading) return <BoardSkeleton />;
   if (error || !data) return <p className="p-6 text-red-700" role="alert">⚠ Could not load board: {String(error)}</p>;
 
-  const lanes = data.lanes.length ? data.lanes : [{ id: null as string | null, name: '', position: 0 }];
-  // safety net for the lane invariant: a card whose lane is unknown (races,
-  // stale cache) renders in the first lane instead of disappearing
-  const laneIds = new Set(data.lanes.map((l) => l.id));
-  const effectiveLane = (c: Card): string | null =>
-    data.lanes.length === 0 ? null : c.lane_id && laneIds.has(c.lane_id) ? c.lane_id : data.lanes[0]!.id;
+  // columns belong to lanes now, so each lane renders its OWN strip — two lanes
+  // on one board can have entirely different columns in a different order
+  const columnsByLane = new Map<string, typeof data.columns>();
+  for (const col of data.columns) {
+    const list = columnsByLane.get(col.lane_id) ?? [];
+    list.push(col);
+    columnsByLane.set(col.lane_id, list);
+  }
 
   return (
     <div className="p-4 h-full">
       <div className="flex items-center gap-3 mb-3">
         <h1 className="text-xl font-bold">{data.board.name}</h1>
         <button onClick={() => setEditColumns(true)} className="text-sm border rounded px-2 py-1 bg-white hover:bg-gray-50">
-          ⚙ Columns & lanes
+          ⚙ Lanes & columns
         </button>
         <button onClick={() => setBoardSettings(true)} className="text-sm border rounded px-2 py-1 bg-white hover:bg-gray-50">
           👥 Board settings
@@ -155,16 +154,25 @@ export default function BoardPage() {
         onDragCancel={() => setDragging(null)}
       >
         <div className="space-y-6">
-          {lanes.map((lane) => (
-            <section key={lane.id ?? 'default'} aria-label={lane.name || 'Board'}>
-              {lane.name && <h2 className="font-semibold text-gray-600 text-sm mb-1 uppercase tracking-wide">{lane.name}</h2>}
+          {data.lanes.map((lane) => (
+            <section key={lane.id} aria-label={lane.name}>
+              <h2 className="font-semibold text-gray-600 text-sm mb-1 uppercase tracking-wide">{lane.name}</h2>
               <div className="flex gap-3 overflow-x-auto pb-2">
-                {data.columns.map((col) => (
-                  <ColumnDrop key={col.id} columnId={col.id} laneId={lane.id}>
+                {(columnsByLane.get(lane.id) ?? []).map((col) => (
+                  <ColumnDrop key={col.id} columnId={col.id} laneId={lane.id} discard={col.semantic === 'discard'}>
                     <header className="flex items-center gap-2 px-1 mb-2">
                       <h3 className="font-semibold text-sm">{col.name}</h3>
                       {col.semantic && (
-                        <span className="text-xs text-gray-400 border rounded px-1" title={`Mapped to "${col.semantic}"`}>
+                        <span
+                          className={`text-xs border rounded px-1 ${
+                            col.semantic === 'discard' ? 'text-stone-600 border-stone-300 bg-stone-100' : 'text-gray-400'
+                          }`}
+                          title={
+                            col.semantic === 'discard'
+                              ? 'Discarded: finished but reverted — not counted as completed work'
+                              : `Mapped to "${col.semantic}"`
+                          }
+                        >
                           {col.semantic}
                         </span>
                       )}
@@ -183,7 +191,7 @@ export default function BoardPage() {
                         );
                       })()}
                       <button
-                        aria-label={lane.name ? `Add card to ${col.name} in ${lane.name}` : `Add card to ${col.name}`}
+                        aria-label={`Add card to ${col.name} in ${lane.name}`}
                         onClick={() => setNewCardAt({ columnId: col.id, laneId: lane.id })}
                         className="ml-auto text-gray-400 hover:text-gray-700"
                       >
@@ -192,7 +200,7 @@ export default function BoardPage() {
                     </header>
                     <div className="space-y-2 min-h-[3rem]">
                       {data.cards
-                        .filter((c) => c.column_id === col.id && effectiveLane(c) === lane.id)
+                        .filter((c) => c.column_id === col.id)
                         .sort((a, b) => a.position - b.position)
                         .map((card) => (
                           <CardTile
@@ -253,15 +261,24 @@ export default function BoardPage() {
   );
 }
 
-function ColumnDrop({ columnId, laneId, children }: { columnId: string; laneId: string | null; children: React.ReactNode }) {
-  const { setNodeRef, isOver } = useDroppable({
-    id: `${columnId}:${laneId ?? 'none'}`,
-    data: { columnId, laneId },
-  });
+function ColumnDrop({
+  columnId,
+  laneId,
+  discard,
+  children,
+}: {
+  columnId: string;
+  laneId: string;
+  discard?: boolean;
+  children: React.ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: `${columnId}:${laneId}`, data: { columnId, laneId } });
   return (
     <div
       ref={setNodeRef}
-      className={`board-column p-2 w-64 shrink-0 transition-all ${isOver ? '!bg-indigo-100 ring-2 ring-indigo-400' : ''}`}
+      className={`board-column p-2 w-64 shrink-0 transition-all ${discard ? 'opacity-80 bg-stone-50' : ''} ${
+        isOver ? '!bg-indigo-100 ring-2 ring-indigo-400' : ''
+      }`}
     >
       {children}
     </div>

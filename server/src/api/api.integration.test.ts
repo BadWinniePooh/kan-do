@@ -132,7 +132,9 @@ describe.skipIf(!hasDb)('API integration', () => {
     expect(edit.statusCode).toBe(403);
   });
 
-  it('cannot remove the last open column', async () => {
+  it('cannot remove a lane\'s last open column', async () => {
+    const detail = await app.inject({ method: 'GET', url: `/api/boards/${boardId}`, headers: { cookie: aliceCookie } });
+    const laneId = detail.json().lanes[0].id;
     const payload = columns.map((c, i) => ({
       id: c.id,
       name: `col${i}`,
@@ -141,7 +143,7 @@ describe.skipIf(!hasDb)('API integration', () => {
     }));
     const res = await app.inject({
       method: 'PUT',
-      url: `/api/boards/${boardId}/columns`,
+      url: `/api/boards/${boardId}/lanes/${laneId}/columns`,
       headers: { cookie: aliceCookie },
       payload,
     });

@@ -33,9 +33,13 @@ web/ (React SPA)  ──HTTP/WS──▶  server/src/api        (routes: validat
 - `organizations` ─ tenants. `users.org_id` scopes every user (global admins have
   `org_id NULL`). All org-scoped queries filter by `org_id`; RBAC checks live in
   `domain/rbac.ts`.
-- `boards` → `board_columns` (with `semantic ∈ {open, done, NULL}` — display name
-  free, semantics fixed; service layer enforces ≥1 open + ≥1 done), `lanes`,
-  `board_members`.
+- `boards` → `lanes` → `board_columns`. Columns are **lane-scoped**: every lane
+  owns an independent set (`board_columns.lane_id`), so two lanes on one board
+  may have entirely different columns, names and order. `semantic ∈ {open, done,
+  discard, NULL}` — display name free, semantics fixed; the service layer
+  enforces ≥1 open + ≥1 done **per lane**, `discard` is optional. A board always
+  has ≥1 lane (a column has nowhere else to live) and a lane holding cards cannot
+  be deleted. `board_members` sits on the board.
 - `cards` ─ column/lane/position, due date, `recurrence_rule` (structured JSON,
   rendered to iCal RRULE semantics by the `rrule` lib), recurrence state fields
   (`recurrence_status`, `closed_at`, `reopen_at`, `reopened_at`, `overdue_at`,
@@ -46,14 +50,18 @@ web/ (React SPA)  ──HTTP/WS──▶  server/src/api        (routes: validat
   non-account owners.
 - `notes` (raw markdown), `attachments` (S3 keys; `cards.cover_attachment_id`
   picks the cover), `card_transitions` (append-only column history — the metrics
-  source of truth).
+  source of truth, and the only history the audit view reads; carries the
+  `reason` typed for discards and overridden moves).
 - `notifications`, `notification_settings` (event × channel toggles),
   `push_tokens`, `notification_ledger` (dedupe keys → at-most-once sends),
   `dashboard_configs` (per user, per board or org-wide widget layout).
 - `column_policies` ─ per-column checklists gating movement (`kind ∈ {enter,
-  leave}`, ordered by `position`); `card_policy_progress` holds a card's partial
-  ticks between move attempts; `card_move_overrides` is the append-only audit of
-  every deliberate bypass (skipped policies denormalised as JSON so the record
+  leave}`, ordered by `position`). They hang off a column, so they are lane-
+  scoped for free: a policy on Lane A's "Review" is unrelated to Lane B's.
+  `card_policy_progress` holds a card's partial ticks between move attempts;
+  `card_move_overrides` is the append-only audit of every deliberate bypass
+  (which policies, whether backwards, whether cross-lane, by whom, when, and the
+  mandatory reason — skipped policies denormalised as JSON so the record
   outlives the policy).
 - `idp_configs` ─ per-org OIDC/SAML settings.
 
@@ -98,18 +106,66 @@ collector in `services/pivotQuery.ts`, which only ever reads boards the caller
 can access; the builder's live preview calls that same endpoint, so a preview
 can never reveal more than the saved widget would.
 
-## Card movement policies
+## Card movement: the three gates
 
-A move from column A to column B must satisfy A's `leave` policies and B's
-`enter` policies, and may not go backwards through the board's column order.
-Decisions are pure (`domain/moveGuard.ts`); `services/cards.ts` loads the
-policies, persists the submitted ticks **before** deciding (so a refused attempt
-never loses partial progress), and refuses with `409` carrying the checklist.
-Each gate takes a separate explicit override; whenever one actually lets
-something through, a `card_move_overrides` row is written inside the same
-transaction as the move. System moves (scheduler reopen, `actor = null`) bypass
-the guard. Overrides surface in board metrics, a per-board audit endpoint, and
-the pivot engine (`overrideStatus` dimension, `overrideCount` metric).
+A move is decided by three independent gates, all pure in `domain/moveGuard.ts`:
+
+1. **Policies** — the source column's `leave` checklist plus the target column's
+   `enter` checklist must all be ticked.
+2. **Direction** — a card may not move to an earlier column. Order is lane-
+   scoped, so this compares positions **inside the card's own lane**; across
+   lanes there is no shared order to compare and the lane gate governs instead.
+3. **Lane** — moving a card to a different lane is not intended and is blocked.
+
+`services/cards.ts` loads the columns and policies, persists the submitted ticks
+**before** deciding (so a refused attempt never loses partial progress), and
+refuses with `409` carrying the checklist. Each gate takes a separate explicit
+override, and every exercised override demands a written reason (`400` without
+one); a `card_move_overrides` row is then written inside the same transaction as
+the move. System moves (scheduler reopen, `actor = null`) bypass the guard.
+
+The target column determines the target lane, so a lane change is always a move,
+never a `PATCH` — `laneId` is deliberately absent from the card patch contract.
+
+### Discard columns
+
+`semantic = 'discard'` marks a column whose cards are **finished but reverted**:
+not active work, and never a successful outcome.
+
+- **Recurrence stops.** Moving to discard does not run the `onClosed` branch, so
+  the "reopen after the interval since `closed_at`" countdown never starts. The
+  card goes dormant (`recurrence_status = 'open'`, every clock field cleared) and
+  a queued reopen job re-checks state and no-ops. Moving it back out leaves it
+  plainly open; the next real close starts the cycle again.
+- **Backwards rule — decision: a discard column is exempt in BOTH directions.**
+  Moving *in* is a terminal exit from the flow ("throw this away"), never a step
+  backwards, wherever the discard column happens to sit in the order. Moving
+  *out* is a resurrection, and the position it was discarded from carries no
+  meaning to measure against — requiring an override to un-discard would make the
+  obvious correction the hard path. Policies still apply to discard columns
+  exactly like any other column, and a discard always demands a reason.
+- **Metrics never conflate it with done.** Lead and cycle time key off the first
+  arrival in a `done` column only, so a discarded card has neither; throughput and
+  time-since-done read `done` columns only; the due-date scan treats discard as
+  finished and stops flagging it overdue; the waiting-time clock stops at the
+  discard. Board metrics report `outcomes.{completedCount, discardedCount,
+  activeCount, completionRate}` where completion means done, never discard.
+
+## Card audit view
+
+`GET /api/cards/:id/audit` returns one chronological timeline: creation, every
+column change (who, from, to, when, reason), and every override (which rules were
+bypassed, by whom, and the justification). It is assembled from
+`card_transitions` — the same history the cycle/lead/waiting metrics are computed
+from — plus `card_move_overrides`, so there is no second history to diverge.
+Access is the board's existing view permission; the audit adds no new tier.
+
+Overrides and discard reasons also surface in board metrics, a per-board audit
+endpoint, and the pivot engine: dimensions `outcome`, `overrideStatus`,
+`discardReason`, `overrideReason` and `overriddenPolicy` (the last two multi-
+valued — a card explodes into one row per override), plus the `overrideCount`
+metric. Note that the `column` dimension groups by column *name*, so the same
+name across lanes groups together on purpose; pair it with `lane` to split them.
 
 ## Real-time
 

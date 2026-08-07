@@ -8,6 +8,7 @@
  */
 import type { PolicyKind, PolicyRef } from '@kan-do/shared';
 import type { Actor } from '../domain/rbac.js';
+import { isBackwards } from '../domain/moveGuard.js';
 import type { Db } from '../db/index.js';
 import type { AppCtx } from './context.js';
 import { badRequest } from './context.js';
@@ -161,25 +162,58 @@ export async function getMoveRequirements(ctx: AppCtx, actor: Actor, cardId: str
   if (!card) throw badRequest('card not found');
   await assertBoardAccess(ctx.db, actor, card.board_id, 'view');
 
+  const cols = ['id', 'name', 'position', 'board_id', 'lane_id', 'semantic'] as const;
   const [fromCol, toCol] = await Promise.all([
-    ctx.db.selectFrom('board_columns').select(['id', 'name', 'position']).where('id', '=', card.column_id).executeTakeFirst(),
-    ctx.db.selectFrom('board_columns').select(['id', 'name', 'position', 'board_id']).where('id', '=', toColumnId).executeTakeFirst(),
+    ctx.db.selectFrom('board_columns').select(cols).where('id', '=', card.column_id).executeTakeFirst(),
+    ctx.db.selectFrom('board_columns').select(cols).where('id', '=', toColumnId).executeTakeFirst(),
   ]);
   if (!toCol || toCol.board_id !== card.board_id) throw badRequest("target column does not belong to the card's board");
-  const target = { id: toCol.id, name: toCol.name, position: toCol.position };
+
+  const laneNames = new Map(
+    (await ctx.db.selectFrom('lanes').select(['id', 'name']).where('board_id', '=', card.board_id).execute()).map((l) => [l.id, l.name]),
+  );
+  const describe = (c: NonNullable<typeof toCol>) => ({
+    id: c.id,
+    name: c.name,
+    position: c.position,
+    laneId: c.lane_id,
+    laneName: laneNames.get(c.lane_id) ?? '',
+    semantic: c.semantic,
+  });
+  const target = describe(toCol);
   // same-column reorder: nothing to satisfy
   if (!fromCol || fromCol.id === toCol.id) {
-    return { backwards: false, applicable: [], checkedIds: [], fromColumn: fromCol ?? null, toColumn: target };
+    return {
+      backwards: false,
+      laneMove: false,
+      discarding: false,
+      requiresReason: false,
+      applicable: [],
+      checkedIds: [],
+      fromColumn: fromCol ? describe(fromCol) : null,
+      toColumn: target,
+    };
   }
 
   const { leavePolicies, enterPolicies } = await movePolicies(ctx.db, fromCol.id, toCol.id);
   const applicable = [...leavePolicies, ...enterPolicies];
   const checkedIds = (await checkedPolicyIds(ctx.db, cardId)).filter((id) => applicable.some((p) => p.id === id));
+  const source = describe(fromCol);
+  const backwards = isBackwards(
+    { id: fromCol.id, laneId: fromCol.lane_id, position: fromCol.position, semantic: fromCol.semantic },
+    { id: toCol.id, laneId: toCol.lane_id, position: toCol.position, semantic: toCol.semantic },
+  );
+  const laneMove = fromCol.lane_id !== toCol.lane_id;
+  const discarding = toCol.semantic === 'discard';
   return {
-    backwards: toCol.position < fromCol.position,
+    backwards,
+    laneMove,
+    discarding,
+    /** discards always owe a reason, even when nothing is being overridden */
+    requiresReason: discarding || backwards || laneMove || applicable.length > checkedIds.length,
     applicable,
     checkedIds,
-    fromColumn: { id: fromCol.id, name: fromCol.name, position: fromCol.position },
+    fromColumn: source,
     toColumn: target,
   };
 }

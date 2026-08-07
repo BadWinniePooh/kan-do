@@ -63,6 +63,8 @@ export interface BoardMembersTable {
 export interface BoardColumnsTable {
   id: Generated<string>;
   board_id: string;
+  /** columns are lane-scoped: each lane owns its own independent set */
+  lane_id: string;
   name: string;
   position: number;
   semantic: Exclude<ColumnSemantic, null> | null;
@@ -97,6 +99,10 @@ export interface CardMoveOverridesTable {
   to_column_id: string | null;
   actor_id: string | null;
   backwards: Generated<boolean>;
+  /** the move crossed lanes, which is blocked by default */
+  lane_move: Generated<boolean>;
+  from_lane_id: string | null;
+  to_lane_id: string | null;
   skipped_policies: unknown;
   reason: string | null;
   at: Created;
@@ -132,7 +138,8 @@ export interface CardsTable {
   id: Generated<string>;
   board_id: string;
   column_id: string;
-  lane_id: string | null;
+  /** never null: a card always lives in a lane, in one of that lane's columns */
+  lane_id: string;
   category_id: string | null;
   position: Generated<number>;
   title: string;
@@ -185,6 +192,8 @@ export interface CardTransitionsTable {
   from_column_id: string | null;
   to_column_id: string;
   actor_id: string | null;
+  /** justification: mandatory for discards and for overridden moves */
+  reason: string | null;
   at: Created;
 }
 

@@ -42,19 +42,24 @@ type WidgetId =
   | 'perColumn'
   | 'overdueCount'
   | 'throughput'
+  | 'outcomes'
   | 'policyOverrides'
   | 'custom';
 
 const DIMENSIONS = [
   'board',
-  'column',
   'lane',
+  'column',
   'category',
   'owner',
   'recurrenceStatus',
   'createdMonth',
   'closedMonth',
+  'outcome',
   'overrideStatus',
+  'discardReason',
+  'overrideReason',
+  'overriddenPolicy',
 ] as const;
 const METRICS = ['count', 'leadTimeMs', 'cycleTimeMs', 'waitingTimeMs', 'timeInColumnMs', 'overrideCount'] as const;
 const AGGREGATIONS = ['count', 'sum', 'avg', 'min', 'max', 'median'] as const;
@@ -98,22 +103,35 @@ interface LayoutItem {
 }
 
 interface Metrics {
-  columns: { id: string; name: string; semantic: string | null }[];
+  columns: { id: string; name: string; semantic: string | null; lane_id: string; lane_name: string }[];
   perCard: { cardId: string; title: string; leadTimeMs: number | null; cycleTimeMs: number | null; waitingTimeMs: number | null }[];
   doneEvents: { at: string }[];
   overdueCount: number;
+  /** completion is "done" only — discarded cards are finished, not successful */
+  outcomes: { completedCount: number; discardedCount: number; activeCount: number; completionRate: number | null };
   overrides: {
     total: number;
     backwardsMoves: number;
+    laneMoves: number;
     policiesSkipped: number;
-    recent: { id: string; cardId: string; at: string; backwards: boolean; actorName: string | null; skipped: { label: string; kind: string }[] }[];
+    recent: {
+      id: string;
+      cardId: string;
+      at: string;
+      backwards: boolean;
+      laneMove: boolean;
+      reason: string | null;
+      actorName: string | null;
+      skipped: { label: string; kind: string }[];
+    }[];
   };
   aggregates: {
     meanLeadTimeMs: number | null;
     meanCycleTimeMs: number | null;
     meanWaitingTimeMs: number | null;
     meanDoneAgeMs: number | null;
-    perColumnMeanMs: { columnId: string; name: string; meanMs: number | null }[];
+    // columns are lane-scoped: the same name in two lanes is two columns
+    perColumnMeanMs: { columnId: string; name: string; laneId: string; laneName: string; meanMs: number | null }[];
   };
 }
 
@@ -125,7 +143,8 @@ const BUILTIN_WIDGETS: { id: Exclude<WidgetId, 'custom'>; label: string }[] = [
   { id: 'overdueCount', label: 'Overdue cards' },
   { id: 'perColumn', label: 'Time in work columns' },
   { id: 'throughput', label: 'Throughput (done/week)' },
-  { id: 'policyOverrides', label: 'Policy overrides' },
+  { id: 'outcomes', label: 'Completed vs discarded' },
+  { id: 'policyOverrides', label: 'Rule overrides' },
 ];
 
 const DEFAULT_LAYOUT: LayoutItem[] = [
@@ -138,14 +157,29 @@ const DEFAULT_LAYOUT: LayoutItem[] = [
 
 const DIM_LABELS: Record<string, string> = {
   board: 'Board',
-  column: 'Column',
   lane: 'Lane',
+  column: 'Column (name)',
   category: 'Category',
   owner: 'Owner',
   recurrenceStatus: 'Recurrence status',
   createdMonth: 'Created (month)',
-  closedMonth: 'Closed (month)',
-  overrideStatus: 'Policy override status',
+  closedMonth: 'Completed (month)',
+  outcome: 'Outcome (done / discarded / active)',
+  overrideStatus: 'Override status',
+  discardReason: 'Discard reason',
+  overrideReason: 'Override reason',
+  overriddenPolicy: 'Overridden rule',
+};
+
+/** Extra context for dimensions whose meaning is not obvious from the label. */
+const DIM_HINTS: Record<string, string> = {
+  column:
+    'Columns belong to lanes, so a name like "Review" groups every lane\'s Review together. Add Lane as the second dimension to split them per lane.',
+  closedMonth: 'When the card reached a done column. Discarded cards are never counted here.',
+  outcome: 'Done means completed successfully; discarded means finished but reverted.',
+  discardReason: 'The justification typed when the card was discarded.',
+  overrideReason: 'The justification typed when a rule was overridden — one row per override.',
+  overriddenPolicy: 'Which rule was bypassed: a named policy, a backwards move, or a cross-lane move.',
 };
 const METRIC_LABELS: Record<string, string> = {
   count: 'Card count',
@@ -458,7 +492,7 @@ function WidgetBuilder({
               className="mt-1 w-full border rounded px-2 py-1"
             >
               {DIMENSIONS.map((d) => (
-                <option key={d} value={d}>
+                <option key={d} value={d} title={DIM_HINTS[d]}>
                   {DIM_LABELS[d]}
                 </option>
               ))}
@@ -474,7 +508,7 @@ function WidgetBuilder({
               >
                 <option value="">—</option>
                 {DIMENSIONS.filter((d) => d !== def.dimensions[0]).map((d) => (
-                  <option key={d} value={d}>
+                  <option key={d} value={d} title={DIM_HINTS[d]}>
                     {DIM_LABELS[d]}
                   </option>
                 ))}
@@ -715,7 +749,7 @@ function SeriesEditor({
             >
               <option value="">same as axis ({DIM_LABELS[axis]})</option>
               {DIMENSIONS.map((d) => (
-                <option key={d} value={d}>
+                <option key={d} value={d} title={DIM_HINTS[d]}>
                   {DIM_LABELS[d]}
                 </option>
               ))}
@@ -1077,19 +1111,25 @@ function Widget({
         />
       );
     case 'perColumn': {
-      // deliberately ONLY in-between work columns: open is a queue and done is
-      // an archive — long dwell there is expected, so mixing them into this
-      // chart would fake bottlenecks. They get their own tiles instead.
+      // deliberately ONLY in-between work columns: open is a queue, done is an
+      // archive and discard is a bin — long dwell in any of them is expected, so
+      // mixing them in would fake bottlenecks. They get their own tiles instead.
+      const multiLane = new Set(metrics.columns.map((c) => c.lane_id)).size > 1;
       const data = metrics.aggregates.perColumnMeanMs
         .filter((c) => {
           const col = metrics.columns.find((x) => x.id === c.columnId);
           return col?.semantic == null;
         })
-        .map((c) => ({ name: c.name, hours: c.meanMs !== null ? +(c.meanMs / 3_600_000).toFixed(1) : 0 }));
+        // columns are lane-scoped: two lanes' "Review" are different columns and
+        // must stay separate bars, so the lane qualifies the label
+        .map((c) => ({
+          name: multiLane ? `${c.laneName} · ${c.name}` : c.name,
+          hours: c.meanMs !== null ? +(c.meanMs / 3_600_000).toFixed(1) : 0,
+        }));
       return (
         <ChartCard
           title="Time in work columns"
-          subtitle="mean hours per in-progress column — open (queue) and done (archive) are excluded on purpose; see the waiting and time-since-done tiles"
+          subtitle="mean hours per in-progress column, per lane — open (queue), done (archive) and discard are excluded on purpose; see the waiting and time-since-done tiles"
         >
           {data.length === 0 ? (
             <p className="text-sm text-gray-500 py-6 text-center">This board has no in-between columns yet.</p>
@@ -1111,18 +1151,31 @@ function Widget({
         </ChartCard>
       );
     }
+    case 'outcomes': {
+      // discarding is not completing: a card that was thrown away must never be
+      // counted as a success, so the two are reported side by side
+      const o = metrics.outcomes ?? { completedCount: 0, discardedCount: 0, activeCount: 0, completionRate: null };
+      return (
+        <StatTile
+          label="Completed vs discarded"
+          value={o.completionRate === null ? '—' : `${Math.round(o.completionRate * 100)}%`}
+          sub={`${o.completedCount} completed · ${o.discardedCount} discarded · ${o.activeCount} still active — share of finished cards that actually succeeded`}
+          accent={o.completionRate !== null && o.completionRate < 0.5 ? C.critical : undefined}
+        />
+      );
+    }
     case 'policyOverrides': {
       // deliberate rule bypasses are recorded, not just warned about — this is
       // the board-level readout of how often that happens
-      const o = metrics.overrides ?? { total: 0, backwardsMoves: 0, policiesSkipped: 0, recent: [] };
+      const o = metrics.overrides ?? { total: 0, backwardsMoves: 0, laneMoves: 0, policiesSkipped: 0, recent: [] };
       return (
         <StatTile
-          label="Policy overrides"
+          label="Rule overrides"
           value={String(o.total)}
           sub={
             o.total === 0
               ? 'no rules have been bypassed'
-              : `${o.policiesSkipped} policy check(s) skipped · ${o.backwardsMoves} forced backwards move(s)`
+              : `${o.policiesSkipped} policy check(s) skipped · ${o.backwardsMoves} backwards · ${o.laneMoves} cross-lane`
           }
           accent={o.total > 0 ? C.critical : undefined}
         />

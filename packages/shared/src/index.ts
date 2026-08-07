@@ -1,6 +1,16 @@
 export type Role = 'global_admin' | 'org_admin' | 'user';
 
-export type ColumnSemantic = 'open' | 'done' | null;
+/**
+ * Fixed column meanings; display names stay user-configurable.
+ *  - 'open'    : queue / not started (mandatory, one per lane)
+ *  - 'done'    : completed successfully (mandatory, one per lane)
+ *  - 'discard' : finished but reverted (optional) — NOT a completed outcome,
+ *                and recurrence stops while a card rests here
+ */
+export type ColumnSemantic = 'open' | 'done' | 'discard' | null;
+
+/** How a card's life ended (or that it hasn't) — the honest completion split. */
+export type CardOutcome = 'done' | 'discarded' | 'active';
 
 /**
  * Column policy checklists.
@@ -20,6 +30,8 @@ export interface PolicyRef {
 /** Payload of the 409 a blocked move returns, so the UI can show the checklist. */
 export interface MoveBlockedDetails {
   backwards: boolean;
+  /** the move crosses into another lane — blocked by default */
+  laneMove: boolean;
   /** every policy that applies to this move (source 'leave' + target 'enter') */
   applicable: PolicyRef[];
   /** the subset still unticked */

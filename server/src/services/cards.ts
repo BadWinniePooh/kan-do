@@ -10,8 +10,8 @@ import * as rec from '../domain/recurrence.js';
 import type { RecurrenceRule } from '@kan-do/shared';
 import type { AppCtx } from './context.js';
 import { badRequest, conflict, forbidden, notFound } from './context.js';
-import { assertBoardAccess, firstLaneId } from './boards.js';
-import { blockedDetails, evaluateMove } from '../domain/moveGuard.js';
+import { assertBoardAccess } from './boards.js';
+import { blockedDetails, evaluateMove, requiresReason, type GuardColumn } from '../domain/moveGuard.js';
 import { checkedPolicyIds, movePolicies, saveProgress } from './policies.js';
 import { scheduleOverdueCheck, scheduleReopen } from '../jobs/queue.js';
 
@@ -41,13 +41,17 @@ export async function createCard(ctx: AppCtx, actor: Actor, input: CardCreateInp
   await assertBoardAccess(ctx.db, actor, input.boardId, 'edit');
   const column = await ctx.db
     .selectFrom('board_columns')
-    .select(['id', 'board_id'])
+    .select(['id', 'board_id', 'lane_id'])
     .where('id', '=', input.columnId)
     .executeTakeFirst();
   if (!column || column.board_id !== input.boardId) throw badRequest('column does not belong to board');
 
-  // lane invariant: on a board with lanes, a new card always lands in one
-  const laneId = input.laneId ?? (await firstLaneId(ctx.db, input.boardId));
+  // columns are lane-scoped, so the chosen column decides the lane; an
+  // explicitly requested lane only ever confirms it
+  if (input.laneId != null && input.laneId !== column.lane_id) {
+    throw badRequest('column belongs to a different lane than the one requested');
+  }
+  const laneId = column.lane_id;
 
   const card = await ctx.db.transaction().execute(async (trx) => {
     const c = await trx
@@ -75,7 +79,8 @@ export async function createCard(ctx: AppCtx, actor: Actor, input: CardCreateInp
 export interface CardPatch {
   title?: string;
   description?: string | null;
-  laneId?: string | null;
+  // no laneId: changing lane is a MOVE (it needs a target column in that lane
+  // and it is blocked by default), so it goes through moveCard, never a patch
   categoryId?: string | null;
   dueDate?: string | null;
   recurrenceRule?: RecurrenceRule | null;
@@ -88,10 +93,6 @@ export async function updateCard(ctx: AppCtx, actor: Actor, cardId: string, patc
   const set: Record<string, unknown> = { updated_at: new Date() };
   if (patch.title !== undefined) set.title = patch.title;
   if (patch.description !== undefined) set.description = patch.description;
-  if (patch.laneId !== undefined) {
-    // never allow a card to go lane-less while the board has lanes
-    set.lane_id = patch.laneId ?? (await firstLaneId(ctx.db, card.board_id));
-  }
   if (patch.categoryId !== undefined) {
     if (patch.categoryId !== null) {
       // tenancy: category must belong to the board's org
@@ -137,18 +138,19 @@ export async function updateCard(ctx: AppCtx, actor: Actor, cardId: string, patc
 }
 
 /**
- * Runs the policy + direction gates for a user-initiated move.
+ * Runs the policy, direction and lane gates for a user-initiated move.
  *
  * Order matters: the checklist ticks are persisted BEFORE the decision, so a
  * refused move still leaves the user's partial progress on the card. Throws 409
- * with the checklist attached when the move must not proceed.
+ * with the checklist attached when the move must not proceed, and 400 when an
+ * override or a discard arrives without the justification it owes.
  */
 async function guardMove(
   ctx: AppCtx,
   actor: Actor,
   cardId: string,
-  fromCol: { id: string; position: number },
-  toCol: { id: string; position: number },
+  fromCol: GuardColumn,
+  toCol: GuardColumn,
   opts: MoveOptions,
 ) {
   const { leavePolicies, enterPolicies } = await movePolicies(ctx.db, fromCol.id, toCol.id);
@@ -165,41 +167,61 @@ async function guardMove(
     leavePolicies,
     enterPolicies,
     checkedIds,
-    override: { policies: opts.override?.policies, backwards: opts.override?.backwards },
+    override: { policies: opts.override?.policies, backwards: opts.override?.backwards, lane: opts.override?.lane },
   });
 
   if (result.blocked) {
-    const why = result.unmet.length && result.backwards
-      ? 'move blocked: unmet column policies and backwards move'
-      : result.unmet.length
-        ? 'move blocked by unmet column policies'
-        : 'move blocked: cards cannot move backwards on this board';
-    throw conflict(why, blockedDetails(result, checkedIds.filter((id) => applicable.some((p) => p.id === id))));
+    const why: string[] = [];
+    if (result.unmet.length && !opts.override?.policies) why.push('unmet column policies');
+    if (result.backwards && !opts.override?.backwards) why.push('cards cannot move to an earlier column in their lane');
+    if (result.laneMove && !opts.override?.lane) why.push('cards are not meant to move between lanes');
+    throw conflict(
+      `move blocked: ${why.join('; ')}`,
+      blockedDetails(result, checkedIds.filter((id) => applicable.some((p) => p.id === id))),
+    );
+  }
+
+  // a bypassed rule or a thrown-away card without a stated reason is exactly
+  // the record that turns out to be useless later
+  if (requiresReason(result) && !opts.reason?.trim()) {
+    throw badRequest(
+      result.overrideUsed
+        ? 'overriding a move requires a reason'
+        : 'discarding a card requires a reason',
+    );
   }
   return { ...result, applicable };
 }
 
 export interface MoveOptions {
+  /** must match the target column's lane when given; the column decides the lane */
   laneId?: string | null;
   position?: number;
   /** complete checklist state for this attempt; persisted even if the move is refused */
   acknowledgedPolicyIds?: string[];
+  /** justification — mandatory for overrides and for discards */
+  reason?: string;
   /** deliberate bypasses — each one recorded in card_move_overrides */
-  override?: { policies?: boolean; backwards?: boolean; reason?: string };
+  override?: { policies?: boolean; backwards?: boolean; lane?: boolean };
 }
 
 /**
- * Move a card to another column (and/or lane/position).
+ * Move a card to another column. The target column determines the target lane,
+ * because columns are lane-scoped.
  *
- * Gated by the move guard (domain/moveGuard.ts): the source column's "before
- * leaving" policies and the target column's "before entering" policies must all
- * be ticked, and a card may not move to an earlier column. Both gates take an
- * explicit override, which is audited. System moves (actor null) bypass the
- * guard — the scheduler reopening a recurring card is not a user decision.
+ * Gated by the move guard (domain/moveGuard.ts): policies must be ticked, a card
+ * may not move to an earlier column in its own lane, and it may not change lane.
+ * Each gate takes an explicit, separately-confirmed override, which is audited
+ * with the reason the user typed. System moves (actor null) bypass the guard —
+ * the scheduler reopening a recurring card is not a user decision.
  *
  * Recurrence hooks:
- *  - into a done column  -> onClosed: schedule reopen
- *  - out of done to open -> onReopened (manual reopen): arm overdue deadline
+ *  - into a done column    -> onClosed: schedule the reopen
+ *  - out of done to open   -> onReopened (manual reopen): arm overdue deadline
+ *  - into a discard column -> the recurrence clock STOPS. Discarding is not
+ *    completing, so it must not start the "reopen after the interval" countdown
+ *    that done triggers; the card goes dormant and normal behaviour resumes if
+ *    it is ever moved back out.
  */
 export async function moveCard(
   ctx: AppCtx,
@@ -213,32 +235,56 @@ export async function moveCard(
     ? await assertCardEdit(ctx, actor, cardId)
     : await db.selectFrom('cards').selectAll().where('id', '=', cardId).executeTakeFirstOrThrow();
 
+  const cols = ['id', 'semantic', 'position', 'lane_id', 'board_id'] as const;
   const [fromCol, toCol] = await Promise.all([
-    db.selectFrom('board_columns').select(['id', 'semantic', 'position']).where('id', '=', card.column_id).executeTakeFirstOrThrow(),
-    db.selectFrom('board_columns').select(['id', 'semantic', 'board_id', 'position']).where('id', '=', toColumnId).executeTakeFirst(),
+    db.selectFrom('board_columns').select(cols).where('id', '=', card.column_id).executeTakeFirstOrThrow(),
+    db.selectFrom('board_columns').select(cols).where('id', '=', toColumnId).executeTakeFirst(),
   ]);
-  if (!toCol || toCol.board_id !== card.board_id) throw badRequest('target column does not belong to the card\'s board');
+  if (!toCol || toCol.board_id !== card.board_id) throw badRequest("target column does not belong to the card's board");
+  if (opts.laneId != null && opts.laneId !== toCol.lane_id) {
+    throw badRequest('target column belongs to a different lane than the one requested');
+  }
 
-  const guard = actor ? await guardMove(ctx, actor, card.id, fromCol, toCol, opts) : null;
+  const guardCol = (c: typeof toCol): GuardColumn => ({
+    id: c.id,
+    laneId: c.lane_id,
+    position: c.position,
+    semantic: c.semantic,
+  });
+  const guard = actor ? await guardMove(ctx, actor, card.id, guardCol(fromCol), guardCol(toCol), opts) : null;
 
   const now = new Date();
+  const reason = opts.reason?.trim() || null;
   const set: Record<string, unknown> = {
     column_id: toColumnId,
+    // the column carries its lane with it — a card is never in a column of a
+    // lane it does not belong to
+    lane_id: toCol.lane_id,
     updated_at: now,
   };
-  if (opts.laneId !== undefined) {
-    set.lane_id = opts.laneId ?? (await firstLaneId(db, card.board_id));
-  }
   if (opts.position !== undefined) set.position = opts.position;
 
   let reopenToSchedule: Date | null = null;
   let overdueToSchedule: Date | null = null;
 
   const rule = card.recurrence_rule as RecurrenceRule | null;
-  const closing = toCol.semantic === 'done' && fromCol.semantic !== 'done';
-  const reopening = fromCol.semantic === 'done' && toCol.semantic !== 'done';
+  const discarding = toCol.semantic === 'discard';
+  const closing = !discarding && toCol.semantic === 'done' && fromCol.semantic !== 'done';
+  const reopening = !discarding && fromCol.semantic === 'done' && toCol.semantic !== 'done';
 
-  if (rule && closing) {
+  if (discarding) {
+    // dormant: no closed_at, so nothing to count an interval from, and any
+    // armed overdue deadline is disarmed. A queued reopen job re-checks state
+    // and no-ops. Moving the card back out leaves it plainly open again.
+    Object.assign(set, {
+      recurrence_status: 'open',
+      closed_at: null,
+      reopen_at: null,
+      reopened_at: null,
+      overdue_at: null,
+      is_overdue: false,
+    });
+  } else if (rule && closing) {
     const s = rec.onClosed(rule, now);
     Object.assign(set, {
       recurrence_status: s.status,
@@ -269,7 +315,14 @@ export async function moveCard(
     if (fromCol.id !== toColumnId) {
       await trx
         .insertInto('card_transitions')
-        .values({ card_id: cardId, from_column_id: fromCol.id, to_column_id: toColumnId, actor_id: actor?.userId ?? null, at: now })
+        .values({
+          card_id: cardId,
+          from_column_id: fromCol.id,
+          to_column_id: toColumnId,
+          actor_id: actor?.userId ?? null,
+          reason,
+          at: now,
+        })
         .execute();
     }
     if (guard?.overrideUsed) {
@@ -282,12 +335,15 @@ export async function moveCard(
           board_id: card.board_id,
           from_column_id: fromCol.id,
           to_column_id: toColumnId,
+          from_lane_id: fromCol.lane_id,
+          to_lane_id: toCol.lane_id,
           actor_id: actor?.userId ?? null,
           backwards: guard.backwards,
+          lane_move: guard.laneMove,
           skipped_policies: JSON.stringify(
             guard.skipped.map((p) => ({ policyId: p.id, kind: p.kind, label: p.label, columnId: p.columnId, columnName: p.columnName })),
           ),
-          reason: opts.override?.reason?.trim() || null,
+          reason,
           at: now,
         })
         .execute();
@@ -407,4 +463,142 @@ export async function deleteNote(ctx: AppCtx, actor: Actor, cardId: string, note
   const card = await assertCardEdit(ctx, actor, cardId);
   await ctx.db.deleteFrom('notes').where('id', '=', noteId).where('card_id', '=', cardId).execute();
   ctx.realtime.emitToBoard(card.board_id, { type: 'card.updated', cardId });
+}
+
+/**
+ * Full card history for the audit view, as one chronological timeline.
+ *
+ * Built entirely from records that already exist — card_transitions (the same
+ * history the cycle/lead/waiting metrics are computed from) and
+ * card_move_overrides — so there is no second, divergent history to maintain.
+ * Creation is the transition with no source column.
+ *
+ * Access is the board's own view permission; the audit adds no new tier.
+ */
+export async function getCardAudit(ctx: AppCtx, actor: Actor, cardId: string) {
+  const card = await ctx.db
+    .selectFrom('cards')
+    .select(['id', 'board_id', 'title', 'created_at'])
+    .where('id', '=', cardId)
+    .executeTakeFirst();
+  if (!card) throw notFound('card');
+  await assertBoardAccess(ctx.db, actor, card.board_id, 'view');
+
+  const [transitions, overrides, columns, lanes] = await Promise.all([
+    ctx.db
+      .selectFrom('card_transitions')
+      .leftJoin('users', 'users.id', 'card_transitions.actor_id')
+      .select([
+        'card_transitions.id',
+        'card_transitions.from_column_id',
+        'card_transitions.to_column_id',
+        'card_transitions.reason',
+        'card_transitions.at',
+        'users.display_name as actor_name',
+      ])
+      .where('card_transitions.card_id', '=', cardId)
+      .orderBy('card_transitions.at')
+      .orderBy('card_transitions.id')
+      .execute(),
+    ctx.db
+      .selectFrom('card_move_overrides')
+      .leftJoin('users', 'users.id', 'card_move_overrides.actor_id')
+      .select([
+        'card_move_overrides.id',
+        'card_move_overrides.from_column_id',
+        'card_move_overrides.to_column_id',
+        'card_move_overrides.backwards',
+        'card_move_overrides.lane_move',
+        'card_move_overrides.skipped_policies',
+        'card_move_overrides.reason',
+        'card_move_overrides.at',
+        'users.display_name as actor_name',
+      ])
+      .where('card_move_overrides.card_id', '=', cardId)
+      .orderBy('card_move_overrides.at')
+      .execute(),
+    // history can name columns and lanes that were since deleted — resolve what
+    // still exists and fall back to a placeholder rather than dropping the entry
+    ctx.db
+      .selectFrom('board_columns')
+      .select(['id', 'name', 'lane_id', 'semantic'])
+      .where('board_id', '=', card.board_id)
+      .execute(),
+    ctx.db.selectFrom('lanes').select(['id', 'name']).where('board_id', '=', card.board_id).execute(),
+  ]);
+
+  const laneName = new Map(lanes.map((l) => [l.id, l.name]));
+  const colInfo = new Map(columns.map((c) => [c.id, c]));
+  const describe = (id: string | null) => {
+    if (!id) return null;
+    const c = colInfo.get(id);
+    if (!c) return { id, name: 'a deleted column', laneName: null, semantic: null };
+    return { id, name: c.name, laneName: laneName.get(c.lane_id) ?? null, semantic: c.semantic };
+  };
+
+  type Entry =
+    | { kind: 'created'; at: Date; actorName: string | null; column: ReturnType<typeof describe> }
+    | {
+        kind: 'moved';
+        at: Date;
+        actorName: string | null;
+        from: ReturnType<typeof describe>;
+        to: ReturnType<typeof describe>;
+        laneChanged: boolean;
+        discarded: boolean;
+        reason: string | null;
+      }
+    | {
+        kind: 'override';
+        at: Date;
+        actorName: string | null;
+        from: ReturnType<typeof describe>;
+        to: ReturnType<typeof describe>;
+        backwards: boolean;
+        laneMove: boolean;
+        skipped: { label: string; kind: string; columnName?: string }[];
+        reason: string | null;
+      };
+
+  const entries: { rank: number; entry: Entry }[] = [];
+  for (const t of transitions) {
+    const to = describe(t.to_column_id);
+    if (!t.from_column_id) {
+      entries.push({ rank: 0, entry: { kind: 'created', at: t.at, actorName: t.actor_name, column: to } });
+      continue;
+    }
+    const from = describe(t.from_column_id);
+    entries.push({
+      rank: 1,
+      entry: {
+        kind: 'moved',
+        at: t.at,
+        actorName: t.actor_name,
+        from,
+        to,
+        laneChanged: Boolean(from && to && from.laneName !== to.laneName),
+        discarded: to?.semantic === 'discard',
+        reason: t.reason,
+      },
+    });
+  }
+  for (const o of overrides) {
+    entries.push({
+      rank: 2, // right after the move it authorised, when both share a timestamp
+      entry: {
+        kind: 'override',
+        at: o.at,
+        actorName: o.actor_name,
+        from: describe(o.from_column_id),
+        to: describe(o.to_column_id),
+        backwards: o.backwards,
+        laneMove: o.lane_move,
+        skipped: Array.isArray(o.skipped_policies) ? (o.skipped_policies as { label: string; kind: string }[]) : [],
+        reason: o.reason,
+      },
+    });
+  }
+
+  entries.sort((a, b) => a.entry.at.getTime() - b.entry.at.getTime() || a.rank - b.rank);
+  return { card: { id: card.id, title: card.title, createdAt: card.created_at }, timeline: entries.map((e) => e.entry) };
 }

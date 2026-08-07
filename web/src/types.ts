@@ -1,6 +1,14 @@
-import type { RecurrenceRule, RecurrenceStatus, Role, PolicyKind, PolicyRef, MoveBlockedDetails } from '@kan-do/shared';
+import type {
+  RecurrenceRule,
+  RecurrenceStatus,
+  Role,
+  PolicyKind,
+  PolicyRef,
+  MoveBlockedDetails,
+  ColumnSemantic,
+} from '@kan-do/shared';
 
-export type { PolicyKind, PolicyRef, MoveBlockedDetails };
+export type { PolicyKind, PolicyRef, MoveBlockedDetails, ColumnSemantic };
 
 export interface Me {
   id: string;
@@ -22,9 +30,11 @@ export interface Board {
 export interface Column {
   id: string;
   board_id: string;
+  /** columns are lane-scoped — each lane owns its own independent set */
+  lane_id: string;
   name: string;
   position: number;
-  semantic: 'open' | 'done' | null;
+  semantic: ColumnSemantic;
 }
 
 export interface Lane {
@@ -48,13 +58,65 @@ export interface ColumnPolicy {
   position: number;
 }
 
+export interface MoveColumnRef {
+  id: string;
+  name: string;
+  position: number;
+  laneId: string;
+  laneName: string;
+  semantic: ColumnSemantic;
+}
+
 /** What the move dialog renders before a move is attempted. */
 export interface MoveRequirements {
   backwards: boolean;
+  /** the move crosses lanes — blocked by default */
+  laneMove: boolean;
+  /** the target is a discard column */
+  discarding: boolean;
+  /** a written justification is mandatory for this move */
+  requiresReason: boolean;
   applicable: PolicyRef[];
   checkedIds: string[];
-  fromColumn: { id: string; name: string; position: number } | null;
-  toColumn: { id: string; name: string; position: number };
+  fromColumn: MoveColumnRef | null;
+  toColumn: MoveColumnRef;
+}
+
+/** One entry of a card's audit timeline. */
+export type AuditEntry =
+  | { kind: 'created'; at: string; actorName: string | null; column: AuditColumn | null }
+  | {
+      kind: 'moved';
+      at: string;
+      actorName: string | null;
+      from: AuditColumn | null;
+      to: AuditColumn | null;
+      laneChanged: boolean;
+      discarded: boolean;
+      reason: string | null;
+    }
+  | {
+      kind: 'override';
+      at: string;
+      actorName: string | null;
+      from: AuditColumn | null;
+      to: AuditColumn | null;
+      backwards: boolean;
+      laneMove: boolean;
+      skipped: { label: string; kind: string; columnName?: string }[];
+      reason: string | null;
+    };
+
+export interface AuditColumn {
+  id: string;
+  name: string;
+  laneName: string | null;
+  semantic: ColumnSemantic;
+}
+
+export interface CardAudit {
+  card: { id: string; title: string; createdAt: string };
+  timeline: AuditEntry[];
 }
 
 export interface Card {

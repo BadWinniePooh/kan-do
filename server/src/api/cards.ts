@@ -41,7 +41,7 @@ export function cardRoutes(ctx: AppCtx) {
         .object({
           title: z.string().min(1).max(500).optional(),
           description: z.string().max(20000).nullable().optional(),
-          laneId: z.string().uuid().nullable().optional(),
+          // lane changes are moves, not patches — see POST /:cardId/move
           categoryId: z.string().uuid().nullable().optional(),
           dueDate: z.string().datetime().nullable().optional(),
           recurrenceRule: recurrenceSchema.nullable().optional(),
@@ -66,11 +66,13 @@ export function cardRoutes(ctx: AppCtx) {
           position: z.number().optional(),
           /** full checklist state for this attempt — saved even if the move is refused */
           acknowledgedPolicyIds: z.array(z.string().uuid()).max(100).optional(),
+          /** justification; the service requires it for overrides and discards */
+          reason: z.string().max(1000).optional(),
           override: z
             .object({
               policies: z.boolean().optional(),
               backwards: z.boolean().optional(),
-              reason: z.string().max(1000).optional(),
+              lane: z.boolean().optional(),
             })
             .optional(),
         })
@@ -80,8 +82,15 @@ export function cardRoutes(ctx: AppCtx) {
         laneId: body.laneId,
         position: body.position,
         acknowledgedPolicyIds: body.acknowledgedPolicyIds,
+        reason: body.reason,
         override: body.override,
       });
+    });
+
+    /** Full history for the card audit view. */
+    app.get('/:cardId/audit', async (req) => {
+      const { cardId } = req.params as { cardId: string };
+      return cards.getCardAudit(ctx, req.actor!, cardId);
     });
 
     /** Save checklist ticks without moving — "I did some of it, come back later". */

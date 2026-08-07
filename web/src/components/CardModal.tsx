@@ -7,12 +7,14 @@ import type { BoardDetail, CardDetail } from '../types';
 import OwnerBadge from './OwnerBadge';
 import RecurrenceBuilder from './RecurrenceBuilder';
 import OwnerPicker from './OwnerPicker';
+import CardAuditView from './CardAudit';
 import { Spinner } from './Loading';
 
 export default function CardModal({ cardId, board, onClose }: { cardId: string; board: BoardDetail; onClose: () => void }) {
   const qc = useQueryClient();
   const { data, error } = useQuery<CardDetail>({ queryKey: ['card', cardId], queryFn: () => get(`/api/cards/${cardId}`) });
   const dialogRef = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState<'details' | 'audit'>('details');
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
@@ -66,6 +68,26 @@ export default function CardModal({ cardId, board, onClose }: { cardId: string; 
             </button>
           </div>
 
+          <div className="flex gap-1 border-b" role="tablist" aria-label="Card view">
+            {(['details', 'audit'] as const).map((v) => (
+              <button
+                key={v}
+                role="tab"
+                aria-selected={view === v}
+                onClick={() => setView(v)}
+                className={`text-sm px-3 py-1.5 -mb-px border-b-2 ${
+                  view === v ? 'border-slate-800 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-800'
+                }`}
+              >
+                {v === 'details' ? 'Details' : '🕘 History'}
+              </button>
+            ))}
+          </div>
+
+          {view === 'audit' ? (
+            <CardAuditView cardId={cardId} />
+          ) : (
+        <>
           {card.is_overdue && (
             <p role="status" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
               ⚠ This task is overdue.
@@ -156,6 +178,8 @@ export default function CardModal({ cardId, board, onClose }: { cardId: string; 
             invalidate();
             onClose();
           }} />
+        </>
+          )}
         </div>
       </div>
     </Overlay>

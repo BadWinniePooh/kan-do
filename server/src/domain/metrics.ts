@@ -47,6 +47,17 @@ export function computeCardMetrics(
     }
   }
 
+  // Discarding is NOT completing: it never sets firstDoneArrival, so lead and
+  // cycle time stay null for a discarded card. It does stop the clock though —
+  // a card thrown away out of the backlog must not accrue waiting time forever.
+  let firstDiscardArrival: Date | null = null;
+  for (const t of ordered) {
+    if (semantics.get(t.toColumnId) === 'discard') {
+      firstDiscardArrival = t.at;
+      break;
+    }
+  }
+
   // first departure from an open-mapped column
   let workStarted: Date | null = null;
   for (const s of stays) {
@@ -61,7 +72,7 @@ export function computeCardMetrics(
   }
 
   let waitingMs = 0;
-  const cutoff = firstDoneArrival ?? now;
+  const cutoff = firstDoneArrival ?? firstDiscardArrival ?? now;
   for (const s of stays) {
     if (semantics.get(s.columnId) === 'open' && s.from < cutoff) {
       const end = s.to < cutoff ? s.to : cutoff;

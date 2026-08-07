@@ -185,6 +185,7 @@ export function meRoutes(ctx: AppCtx) {
                 'perColumn',
                 'overdueCount',
                 'throughput',
+                'outcomes',
                 'policyOverrides',
                 'custom',
               ]),

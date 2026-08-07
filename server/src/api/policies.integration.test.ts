@@ -263,7 +263,7 @@ describe.skipIf(!hasDb)('column policies', () => {
       const res = await move(card, open.id);
       expect(res.statusCode).toBe(409);
       expect(res.json().details.backwards).toBe(true);
-      expect(res.json().error).toMatch(/backwards/);
+      expect(res.json().error).toMatch(/earlier column/);
     });
 
     it('a forward move to the very next column is never backwards', async () => {
@@ -280,7 +280,7 @@ describe.skipIf(!hasDb)('column policies', () => {
       const blocked = await move(card, done.id);
       expect(blocked.statusCode).toBe(409);
 
-      const forced = await move(card, done.id, { override: { policies: true, reason: 'hotfix, notes to follow' } });
+      const forced = await move(card, done.id, { override: { policies: true }, reason: 'hotfix, notes to follow' });
       expect(forced.statusCode).toBe(200);
       expect(forced.json().column_id).toBe(done.id);
 
@@ -296,9 +296,18 @@ describe.skipIf(!hasDb)('column policies', () => {
       await setPolicies(done.id, []);
     });
 
+    it('an override without a reason is refused', async () => {
+      const card = await newCard(done.id, 'No excuse');
+      const res = await move(card, open.id, { override: { backwards: true } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/requires a reason/);
+      const audit = await ctx.db.selectFrom('card_move_overrides').select('id').where('card_id', '=', card).execute();
+      expect(audit).toEqual([]);
+    });
+
     it('a backwards override is recorded as such', async () => {
       const card = await newCard(done.id, 'Reversed');
-      const res = await move(card, open.id, { override: { backwards: true } });
+      const res = await move(card, open.id, { override: { backwards: true }, reason: 'shipped by mistake' });
       expect(res.statusCode).toBe(200);
       expect(res.json().column_id).toBe(open.id);
 
@@ -306,11 +315,12 @@ describe.skipIf(!hasDb)('column policies', () => {
       expect(audit).toHaveLength(1);
       expect(audit[0]!.backwards).toBe(true);
       expect(audit[0]!.skipped_policies).toEqual([]);
+      expect(audit[0]!.reason).toBe('shipped by mistake');
     });
 
     it('a policy override alone does not unlock a backwards move', async () => {
       const card = await newCard(done.id, 'Still stuck');
-      const res = await move(card, open.id, { override: { policies: true } });
+      const res = await move(card, open.id, { override: { policies: true }, reason: 'trying it on' });
       expect(res.statusCode).toBe(409);
       expect(res.json().details.backwards).toBe(true);
     });
@@ -338,7 +348,7 @@ describe.skipIf(!hasDb)('column policies', () => {
     it('the audit survives deleting the policy it names', async () => {
       const [policy] = (await setPolicies(done.id, [{ kind: 'enter', label: 'Temporary rule' }])).json() as PolicyRow[];
       const card = await newCard(doing.id, 'Outlives its rule');
-      await move(card, done.id, { override: { policies: true } });
+      await move(card, done.id, { override: { policies: true }, reason: 'rule about to be retired' });
       await setPolicies(done.id, []); // policy gone
 
       const audit = await ctx.db.selectFrom('card_move_overrides').selectAll().where('card_id', '=', card).execute();

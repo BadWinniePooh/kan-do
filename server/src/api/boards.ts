@@ -10,7 +10,7 @@ const columnSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().min(1).max(100),
   position: z.number().int(),
-  semantic: z.enum(['open', 'done']).nullable(),
+  semantic: z.enum(['open', 'done', 'discard']).nullable(),
 });
 
 const policySchema = z.object({
@@ -48,16 +48,18 @@ export function boardRoutes(ctx: AppCtx) {
       return { ok: true };
     });
 
-    app.put('/:boardId/columns', async (req) => {
-      const { boardId } = req.params as { boardId: string };
+    /** Columns are lane-scoped — each lane's set is saved on its own. */
+    app.put('/:boardId/lanes/:laneId/columns', async (req) => {
+      const { boardId, laneId } = req.params as { boardId: string; laneId: string };
       const body = z.array(columnSchema).min(2).parse(req.body);
-      return boards.saveColumns(ctx, req.actor!, boardId, body);
+      return boards.saveColumns(ctx, req.actor!, boardId, laneId, body);
     });
 
     app.put('/:boardId/lanes', async (req) => {
       const { boardId } = req.params as { boardId: string };
       const body = z
         .array(z.object({ id: z.string().uuid().optional(), name: z.string().min(1).max(100), position: z.number().int() }))
+        .min(1)
         .parse(req.body);
       return boards.saveLanes(ctx, req.actor!, boardId, body);
     });

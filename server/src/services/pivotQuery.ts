@@ -61,20 +61,31 @@ async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Pro
       ownersByCard.set(o.card_id, list);
     }
 
-    // policy/backwards overrides make it into the pivot so "how often do we
-    // bypass our own rules" is answerable from the widget builder
+    // overrides make it into the pivot so "how often do we bypass our own rules,
+    // which ones, and why" is answerable straight from the widget builder
     const overrides = await ctx.db
       .selectFrom('card_move_overrides')
-      .select(({ fn }) => ['card_id', fn.countAll().as('n')])
+      .select(['card_id', 'backwards', 'lane_move', 'skipped_policies', 'reason'])
       .where('board_id', '=', board.id)
-      .groupBy('card_id')
       .execute();
-    const overridesByCard = new Map(overrides.map((o) => [o.card_id, Number(o.n)]));
+    const overridesByCard = new Map<string, { count: number; reasons: string[]; policies: string[] }>();
+    for (const o of overrides) {
+      const entry = overridesByCard.get(o.card_id) ?? { count: 0, reasons: [], policies: [] };
+      entry.count += 1;
+      if (o.reason?.trim()) entry.reasons.push(o.reason.trim());
+      for (const p of Array.isArray(o.skipped_policies) ? (o.skipped_policies as { label: string }[]) : []) {
+        if (p.label) entry.policies.push(p.label);
+      }
+      // the two rule bypasses that are not policies still deserve a name
+      if (o.backwards) entry.policies.push('Backwards move');
+      if (o.lane_move) entry.policies.push('Cross-lane move');
+      overridesByCard.set(o.card_id, entry);
+    }
 
     for (const card of cards) {
       const transitions = await ctx.db
         .selectFrom('card_transitions')
-        .select(['to_column_id', 'at'])
+        .select(['to_column_id', 'at', 'reason'])
         .where('card_id', '=', card.id)
         .orderBy('at')
         .execute();
@@ -89,6 +100,8 @@ async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Pro
           )
         : { leadTimeMs: null, cycleTimeMs: null, waitingTimeMs: null, perColumnMs: {} as Record<string, number> };
 
+      // closedMonth is DONE only — a discarded card was never completed and
+      // must never land in a completion bucket
       let closedMonth = 'Not done';
       for (const t of transitions) {
         if (semantics.get(t.to_column_id) === 'done') {
@@ -97,23 +110,38 @@ async function collectFacts(ctx: AppCtx, actor: Actor, boardIds?: string[]): Pro
         }
       }
 
-      const overrideCount = overridesByCard.get(card.id) ?? 0;
+      // the reason given the last time this card was thrown away
+      let discardReason = 'Not discarded';
+      for (const t of [...transitions].reverse()) {
+        if (semantics.get(t.to_column_id) === 'discard') {
+          discardReason = t.reason?.trim() || 'No reason given';
+          break;
+        }
+      }
+
+      const currentSemantic = semantics.get(card.column_id);
+      const outcome = currentSemantic === 'done' ? 'Done' : currentSemantic === 'discard' ? 'Discarded' : 'Active';
+      const ov = overridesByCard.get(card.id);
 
       facts.push({
         board: board.name,
         column: colName.get(card.column_id) ?? 'Unknown',
-        lane: card.lane_id ? (laneName.get(card.lane_id) ?? 'None') : 'None',
+        lane: laneName.get(card.lane_id) ?? 'None',
         category: card.category_id ? (catName.get(card.category_id) ?? 'None') : 'None',
         owners: ownersByCard.get(card.id) ?? [],
         recurrenceStatus: card.recurrence_rule ? card.recurrence_status : 'not recurring',
         createdMonth: month(new Date(card.created_at)),
         closedMonth,
-        overrideStatus: overrideCount > 0 ? 'overridden' : 'clean',
+        outcome,
+        overrideStatus: ov ? 'overridden' : 'clean',
+        discardReason,
+        overrideReasons: ov?.reasons ?? [],
+        overriddenPolicies: ov?.policies ?? [],
         leadTimeMs: m.leadTimeMs,
         cycleTimeMs: m.cycleTimeMs,
         waitingTimeMs: m.waitingTimeMs,
         timeInColumnMs: m.perColumnMs[card.column_id] ?? null,
-        overrideCount,
+        overrideCount: ov?.count ?? 0,
       });
     }
   }

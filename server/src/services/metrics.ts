@@ -6,9 +6,24 @@ import { assertBoardAccess } from './boards.js';
 
 export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
   await assertBoardAccess(ctx.db, actor, boardId, 'view');
+  // columns are lane-scoped, so every column is reported with its lane: two
+  // lanes can both have a "Review" and they are different columns
   const [columns, cards] = await Promise.all([
-    ctx.db.selectFrom('board_columns').select(['id', 'name', 'semantic']).where('board_id', '=', boardId).orderBy('position').execute(),
-    ctx.db.selectFrom('cards').select(['id', 'title', 'created_at']).where('board_id', '=', boardId).execute(),
+    ctx.db
+      .selectFrom('board_columns')
+      .innerJoin('lanes', 'lanes.id', 'board_columns.lane_id')
+      .select([
+        'board_columns.id',
+        'board_columns.name',
+        'board_columns.semantic',
+        'board_columns.lane_id',
+        'lanes.name as lane_name',
+      ])
+      .where('board_columns.board_id', '=', boardId)
+      .orderBy('lanes.position')
+      .orderBy('board_columns.position')
+      .execute(),
+    ctx.db.selectFrom('cards').select(['id', 'title', 'created_at', 'column_id']).where('board_id', '=', boardId).execute(),
   ]);
   const semantics = new Map<string, ColumnSemantic>(columns.map((c) => [c.id, c.semantic]));
   const now = new Date();
@@ -33,8 +48,11 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
     perCard.push({ cardId: card.id, title: card.title, ...m });
   }
 
-  // throughput: first arrival of each card into a done-mapped column
+  // throughput: first arrival of each card into a done-mapped column.
+  // Discard columns are deliberately absent — a discarded card is finished but
+  // reverted, and counting it here would inflate throughput with failures.
   const doneColumnIds = columns.filter((c) => c.semantic === 'done').map((c) => c.id);
+  const discardColumnIds = new Set(columns.filter((c) => c.semantic === 'discard').map((c) => c.id));
   const doneEvents = doneColumnIds.length
     ? await ctx.db
         .selectFrom('card_transitions')
@@ -83,6 +101,8 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
       'card_move_overrides.id',
       'card_move_overrides.card_id',
       'card_move_overrides.backwards',
+      'card_move_overrides.lane_move',
+      'card_move_overrides.reason',
       'card_move_overrides.skipped_policies',
       'card_move_overrides.at',
       'users.display_name as actor_name',
@@ -94,20 +114,36 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
   const skippedCount = (r: (typeof overrideRows)[number]) =>
     Array.isArray(r.skipped_policies) ? r.skipped_policies.length : 0;
 
+  // outcome split — completion is "done", never "discard"
+  const doneSet = new Set(doneColumnIds);
+  const completedCount = cards.filter((c) => doneSet.has(c.column_id)).length;
+  const discardedCount = cards.filter((c) => discardColumnIds.has(c.column_id)).length;
+  const finished = completedCount + discardedCount;
+
   return {
     columns,
     perCard,
     doneEvents: doneEvents.map((d) => ({ at: d.done_at })),
     overdueCount: Number(overdueCount?.n ?? 0),
+    outcomes: {
+      completedCount,
+      discardedCount,
+      activeCount: cards.length - finished,
+      /** share of FINISHED cards that actually succeeded; null with none finished */
+      completionRate: finished > 0 ? completedCount / finished : null,
+    },
     overrides: {
       total: overrideRows.length,
       backwardsMoves: overrideRows.filter((r) => r.backwards).length,
+      laneMoves: overrideRows.filter((r) => r.lane_move).length,
       policiesSkipped: overrideRows.reduce((sum, r) => sum + skippedCount(r), 0),
       recent: overrideRows.slice(0, 20).map((r) => ({
         id: r.id,
         cardId: r.card_id,
         at: r.at,
         backwards: r.backwards,
+        laneMove: r.lane_move,
+        reason: r.reason,
         actorName: r.actor_name,
         skipped: Array.isArray(r.skipped_policies) ? (r.skipped_policies as { label: string; kind: string }[]) : [],
       })),
@@ -120,6 +156,8 @@ export async function boardMetrics(ctx: AppCtx, actor: Actor, boardId: string) {
       perColumnMeanMs: columns.map((col) => ({
         columnId: col.id,
         name: col.name,
+        laneId: col.lane_id,
+        laneName: col.lane_name,
         meanMs: meanMs(perCard.map((c) => c.perColumnMs[col.id] ?? null)),
       })),
     },

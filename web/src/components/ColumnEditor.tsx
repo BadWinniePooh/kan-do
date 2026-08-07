@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { put } from '../api';
-import type { BoardDetail, Column, ColumnPolicy, PolicyKind } from '../types';
+import type { BoardDetail, Column, ColumnPolicy, ColumnSemantic, Lane, PolicyKind } from '../types';
 import { useDismiss } from '../useDismiss';
 
 interface ColDraft {
@@ -9,10 +9,11 @@ interface ColDraft {
   key: string;
   id?: string;
   name: string;
-  semantic: 'open' | 'done' | null;
+  semantic: ColumnSemantic;
 }
 
 interface LaneDraft {
+  key: string;
   id?: string;
   name: string;
 }
@@ -24,48 +25,69 @@ interface PolicyDraft {
 }
 
 let draftSeq = 0;
+const nextKey = () => `new-${++draftSeq}`;
+
+const SEMANTIC_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: '', label: 'plain', hint: 'ordinary work column' },
+  { value: 'open', label: '= open', hint: 'the queue — required, one per lane' },
+  { value: 'done', label: '= done', hint: 'completed successfully — required, one per lane' },
+  { value: 'discard', label: '= discard', hint: 'finished but reverted — optional, never counts as completed' },
+];
 
 /**
- * Column/lane editor. Columns are freely renamed/reordered/added; the board
- * must keep >=1 "open" and >=1 "done" mapped column (validated inline here and
- * enforced server-side).
+ * Lane and column editor.
  *
- * Each column also carries its movement policies — checklists a card must
- * satisfy before entering or before leaving it. They are saved after the
- * columns, so policies can be written for a column created in the same dialog.
+ * Columns are lane-scoped: every lane owns its own independent set, with its own
+ * names, order, semantics and policies. Two lanes on one board may look nothing
+ * alike. Each lane must keep at least one "open" and one "done" column; a
+ * "discard" column is optional.
+ *
+ * Save order is lanes → each lane's columns → each column's policies, so a lane
+ * and the columns created inside it in the same sitting can find their ids.
  */
 export default function ColumnEditor({ board, onClose }: { board: BoardDetail; onClose: () => void }) {
   const qc = useQueryClient();
-  const [cols, setCols] = useState<ColDraft[]>(
-    board.columns.map((c) => ({ key: c.id, id: c.id, name: c.name, semantic: c.semantic })),
-  );
-  const [lanes, setLanes] = useState<LaneDraft[]>(board.lanes.map((l) => ({ id: l.id, name: l.name })));
+  const [lanes, setLanes] = useState<LaneDraft[]>(board.lanes.map((l) => ({ key: l.id, id: l.id, name: l.name })));
+  const [cols, setCols] = useState<Record<string, ColDraft[]>>(() => initialColumns(board.lanes, board.columns));
   const [policies, setPolicies] = useState<Record<string, PolicyDraft[]>>(() => initialPolicies(board.columns, board.policies));
   const [openPolicies, setOpenPolicies] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useDismiss<HTMLDivElement>(onClose);
 
-  const missingOpen = !cols.some((c) => c.semantic === 'open');
-  const missingDone = !cols.some((c) => c.semantic === 'done');
+  const laneColumns = (laneKey: string) => cols[laneKey] ?? [];
+  const laneProblem = (laneKey: string): string | null => {
+    const list = laneColumns(laneKey);
+    if (!list.some((c) => c.semantic === 'open')) return 'needs a column mapped to "open"';
+    if (!list.some((c) => c.semantic === 'done')) return 'needs a column mapped to "done"';
+    if (list.some((c) => !c.name.trim())) return 'has a column with no name';
+    return null;
+  };
+  const problems = lanes.map((l) => ({ lane: l, problem: laneProblem(l.key) })).filter((p) => p.problem);
   const blankPolicy = Object.values(policies).some((list) => list.some((p) => !p.label.trim()));
 
   const save = useMutation({
     mutationFn: async () => {
-      const saved = await put<Column[]>(
-        `/api/boards/${board.board.id}/columns`,
-        cols.map((c, i) => ({ ...c, position: i })),
+      const savedLanes = await put<Lane[]>(
+        `/api/boards/${board.board.id}/lanes`,
+        lanes.map((l, i) => ({ id: l.id, name: l.name.trim(), position: i })),
       );
-      await put(`/api/boards/${board.board.id}/lanes`, lanes.map((l, i) => ({ ...l, position: i })));
-      // the columns come back in the order they were sent, which is how a
-      // brand-new column's policies find the id they belong to
-      for (let i = 0; i < cols.length; i++) {
-        const drafts = policies[cols[i]!.key] ?? [];
-        const had = board.policies.some((p) => p.column_id === cols[i]!.id);
-        if (drafts.length === 0 && !had) continue;
-        await put(
-          `/api/boards/${board.board.id}/columns/${saved[i]!.id}/policies`,
-          drafts.map((d, j) => ({ ...d, label: d.label.trim(), position: j })),
+      for (let i = 0; i < lanes.length; i++) {
+        const laneKey = lanes[i]!.key;
+        const laneId = savedLanes[i]!.id;
+        const savedCols = await put<Column[]>(
+          `/api/boards/${board.board.id}/lanes/${laneId}/columns`,
+          laneColumns(laneKey).map((c, j) => ({ id: c.id, name: c.name.trim(), position: j, semantic: c.semantic })),
         );
+        for (let j = 0; j < laneColumns(laneKey).length; j++) {
+          const colKey = laneColumns(laneKey)[j]!.key;
+          const drafts = policies[colKey] ?? [];
+          const had = board.policies.some((p) => p.column_id === laneColumns(laneKey)[j]!.id);
+          if (drafts.length === 0 && !had) continue;
+          await put(
+            `/api/boards/${board.board.id}/columns/${savedCols[j]!.id}/policies`,
+            drafts.map((d, k) => ({ ...d, label: d.label.trim(), position: k })),
+          );
+        }
       }
     },
     onSuccess: () => {
@@ -75,15 +97,41 @@ export default function ColumnEditor({ board, onClose }: { board: BoardDetail; o
     onError: (e) => setError(e.message),
   });
 
-  const moveCol = (i: number, dir: -1 | 1) => {
-    const next = [...cols];
+  const swapLane = (i: number, dir: -1 | 1) => {
     const j = i + dir;
-    if (j < 0 || j >= next.length) return;
+    if (j < 0 || j >= lanes.length) return;
+    const next = [...lanes];
     [next[i], next[j]] = [next[j]!, next[i]!];
-    setCols(next);
+    setLanes(next);
   };
 
-  const setColPolicies = (key: string, list: PolicyDraft[]) => setPolicies({ ...policies, [key]: list });
+  const addLane = () => {
+    const key = nextKey();
+    setLanes([...lanes, { key, name: 'New lane' }]);
+    // a new lane is born valid: the server seeds exactly this trio too
+    setCols({
+      ...cols,
+      [key]: [
+        { key: nextKey(), name: 'Open', semantic: 'open' },
+        { key: nextKey(), name: 'In progress', semantic: null },
+        { key: nextKey(), name: 'Done', semantic: 'done' },
+      ],
+    });
+  };
+
+  const removeLane = (laneKey: string) => {
+    const lane = lanes.find((l) => l.key === laneKey);
+    const holdsCards = lane?.id && board.cards.some((c) => c.lane_id === lane.id);
+    if (holdsCards) {
+      setError('That lane still holds cards. Move them to another lane before deleting it.');
+      return;
+    }
+    setError(null);
+    setLanes(lanes.filter((l) => l.key !== laneKey));
+    setCols(Object.fromEntries(Object.entries(cols).filter(([k]) => k !== laneKey)));
+  };
+
+  const setLaneColumns = (laneKey: string, next: ColDraft[]) => setCols({ ...cols, [laneKey]: next });
 
   return (
     <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center pt-10 px-4" onClick={onClose}>
@@ -91,100 +139,147 @@ export default function ColumnEditor({ board, onClose }: { board: BoardDetail; o
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Edit columns and lanes"
-        className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        aria-label="Edit lanes and columns"
+        className="bg-white rounded-xl shadow-xl w-full max-w-3xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-bold">Columns</h2>
-        {(missingOpen || missingDone) && (
+        <div>
+          <h2 className="text-lg font-bold">Lanes & columns</h2>
+          <p className="text-sm text-gray-500">
+            Every lane has its own columns — own names, own order, own policies. Two lanes can look completely different.
+          </p>
+        </div>
+
+        {problems.length > 0 && (
           <p role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
-            ⚠ The board needs at least one column mapped to {missingOpen ? '"open"' : '"done"'} — recurrence and metrics
-            depend on it. The name can be anything.
+            ⚠ {problems.map((p) => `“${p.lane.name || 'Unnamed lane'}” ${p.problem}`).join('; ')}. Recurrence and metrics
+            depend on the open/done mapping; the names can be anything.
           </p>
         )}
-        {cols.map((c, i) => {
-          const key = c.key;
-          const list = policies[key] ?? [];
-          return (
-            <div key={key} className="border rounded p-2 space-y-2">
-              <div className="flex items-center gap-2">
-                <button aria-label={`Move ${c.name} left`} onClick={() => moveCol(i, -1)} className="text-gray-400 hover:text-gray-700">
-                  ↑
-                </button>
-                <button aria-label={`Move ${c.name} right`} onClick={() => moveCol(i, 1)} className="text-gray-400 hover:text-gray-700">
-                  ↓
-                </button>
-                <input
-                  aria-label={`Column ${i + 1} name`}
-                  value={c.name}
-                  onChange={(e) => setCols(cols.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-                  className="border rounded px-2 py-1 flex-1 text-sm"
-                />
-                <select
-                  aria-label={`Column ${i + 1} meaning`}
-                  value={c.semantic ?? ''}
-                  onChange={(e) =>
-                    setCols(cols.map((x, j) => (j === i ? { ...x, semantic: (e.target.value || null) as ColDraft['semantic'] } : x)))
-                  }
-                  className="border rounded px-2 py-1 text-sm"
-                >
-                  <option value="">plain</option>
-                  <option value="open">= open</option>
-                  <option value="done">= done</option>
-                </select>
-                <button
-                  aria-expanded={openPolicies === key}
-                  onClick={() => setOpenPolicies(openPolicies === key ? null : key)}
-                  className="text-xs border rounded px-2 py-1 whitespace-nowrap hover:bg-gray-50"
-                >
-                  ☑ Policies{list.length ? ` (${list.length})` : ''}
-                </button>
-                <button
-                  aria-label={`Delete column ${c.name}`}
-                  onClick={() => {
-                    setCols(cols.filter((_, j) => j !== i));
-                    setPolicies(Object.fromEntries(Object.entries(policies).filter(([k]) => k !== key)));
-                  }}
-                  className="text-red-600 hover:text-red-800"
-                >
-                  🗑
-                </button>
-              </div>
-              {openPolicies === key && (
-                <PolicyEditor columnName={c.name} policies={list} onChange={(next) => setColPolicies(key, next)} />
-              )}
-            </div>
-          );
-        })}
-        <button
-          onClick={() => setCols([...cols, { key: `new-${++draftSeq}`, name: 'New column', semantic: null }])}
-          className="text-sm border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100"
-        >
-          + Add column
-        </button>
 
-        <h2 className="text-lg font-bold pt-2">Lanes (swimlanes)</h2>
-        {lanes.map((l, i) => (
-          <div key={l.id ?? `newlane-${i}`} className="flex items-center gap-2">
-            <input
-              aria-label={`Lane ${i + 1} name`}
-              value={l.name}
-              onChange={(e) => setLanes(lanes.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-              className="border rounded px-2 py-1 flex-1 text-sm"
-            />
+        {lanes.map((lane, li) => (
+          <section key={lane.key} className="border rounded-lg p-3 space-y-2" aria-label={`Lane ${lane.name}`}>
+            <div className="flex items-center gap-2">
+              <button aria-label={`Move lane ${lane.name} up`} disabled={li === 0} onClick={() => swapLane(li, -1)} className="text-gray-400 disabled:opacity-30">
+                ↑
+              </button>
+              <button
+                aria-label={`Move lane ${lane.name} down`}
+                disabled={li === lanes.length - 1}
+                onClick={() => swapLane(li, 1)}
+                className="text-gray-400 disabled:opacity-30"
+              >
+                ↓
+              </button>
+              <input
+                aria-label={`Lane ${li + 1} name`}
+                value={lane.name}
+                onChange={(e) => setLanes(lanes.map((x, j) => (j === li ? { ...x, name: e.target.value } : x)))}
+                className="border rounded px-2 py-1 flex-1 font-semibold text-sm"
+              />
+              <button
+                aria-label={`Delete lane ${lane.name}`}
+                disabled={lanes.length === 1}
+                title={lanes.length === 1 ? 'A board needs at least one lane' : undefined}
+                onClick={() => removeLane(lane.key)}
+                className="text-red-600 hover:text-red-800 disabled:opacity-30"
+              >
+                🗑
+              </button>
+            </div>
+
+            {laneColumns(lane.key).map((c, i) => (
+              <div key={c.key} className="ml-6 border rounded p-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    aria-label={`Move ${c.name} left`}
+                    disabled={i === 0}
+                    onClick={() => {
+                      const next = [...laneColumns(lane.key)];
+                      [next[i - 1], next[i]] = [next[i]!, next[i - 1]!];
+                      setLaneColumns(lane.key, next);
+                    }}
+                    className="text-gray-400 disabled:opacity-30"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    aria-label={`Move ${c.name} right`}
+                    disabled={i === laneColumns(lane.key).length - 1}
+                    onClick={() => {
+                      const next = [...laneColumns(lane.key)];
+                      [next[i], next[i + 1]] = [next[i + 1]!, next[i]!];
+                      setLaneColumns(lane.key, next);
+                    }}
+                    className="text-gray-400 disabled:opacity-30"
+                  >
+                    ↓
+                  </button>
+                  <input
+                    aria-label={`${lane.name} column ${i + 1} name`}
+                    value={c.name}
+                    onChange={(e) =>
+                      setLaneColumns(lane.key, laneColumns(lane.key).map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
+                    }
+                    className="border rounded px-2 py-1 flex-1 text-sm"
+                  />
+                  <select
+                    aria-label={`${lane.name} column ${i + 1} meaning`}
+                    value={c.semantic ?? ''}
+                    onChange={(e) =>
+                      setLaneColumns(
+                        lane.key,
+                        laneColumns(lane.key).map((x, j) =>
+                          j === i ? { ...x, semantic: (e.target.value || null) as ColumnSemantic } : x,
+                        ),
+                      )
+                    }
+                    className="border rounded px-2 py-1 text-sm"
+                    title={SEMANTIC_OPTIONS.find((o) => (o.value || null) === c.semantic)?.hint}
+                  >
+                    {SEMANTIC_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value} title={o.hint}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    aria-expanded={openPolicies === c.key}
+                    onClick={() => setOpenPolicies(openPolicies === c.key ? null : c.key)}
+                    className="text-xs border rounded px-2 py-1 whitespace-nowrap hover:bg-gray-50"
+                  >
+                    ☑ Policies{(policies[c.key] ?? []).length ? ` (${policies[c.key]!.length})` : ''}
+                  </button>
+                  <button
+                    aria-label={`Delete column ${c.name}`}
+                    onClick={() => {
+                      setLaneColumns(lane.key, laneColumns(lane.key).filter((_, j) => j !== i));
+                      setPolicies(Object.fromEntries(Object.entries(policies).filter(([k]) => k !== c.key)));
+                    }}
+                    className="text-red-600 hover:text-red-800"
+                  >
+                    🗑
+                  </button>
+                </div>
+                {openPolicies === c.key && (
+                  <PolicyEditor
+                    columnName={c.name}
+                    policies={policies[c.key] ?? []}
+                    onChange={(next) => setPolicies({ ...policies, [c.key]: next })}
+                  />
+                )}
+              </div>
+            ))}
             <button
-              aria-label={`Delete lane ${l.name}`}
-              onClick={() => setLanes(lanes.filter((_, j) => j !== i))}
-              className="text-red-600 hover:text-red-800"
+              onClick={() => setLaneColumns(lane.key, [...laneColumns(lane.key), { key: nextKey(), name: 'New column', semantic: null }])}
+              className="ml-6 text-sm border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100"
             >
-              🗑
+              + Add column to {lane.name || 'this lane'}
             </button>
-          </div>
+          </section>
         ))}
-        <button
-          onClick={() => setLanes([...lanes, { name: 'New lane' }])}
-          className="text-sm border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100"
-        >
+
+        <button onClick={addLane} className="text-sm border rounded px-2 py-1 bg-gray-50 hover:bg-gray-100">
           + Add lane
         </button>
 
@@ -197,7 +292,7 @@ export default function ColumnEditor({ board, onClose }: { board: BoardDetail; o
           </button>
           <button
             onClick={() => save.mutate()}
-            disabled={missingOpen || missingDone || save.isPending || cols.some((c) => !c.name.trim()) || blankPolicy}
+            disabled={problems.length > 0 || save.isPending || blankPolicy || lanes.some((l) => !l.name.trim())}
             className="bg-slate-800 text-white rounded px-3 py-1 disabled:opacity-50"
           >
             {save.isPending ? 'Saving…' : 'Save'}
@@ -208,7 +303,19 @@ export default function ColumnEditor({ board, onClose }: { board: BoardDetail; o
   );
 }
 
-/** Drafts keyed by column key, which for a saved column is its id. */
+/** Column drafts keyed by lane key, which for a saved lane is its id. */
+function initialColumns(lanes: Lane[], columns: Column[]): Record<string, ColDraft[]> {
+  const out: Record<string, ColDraft[]> = {};
+  for (const lane of lanes) {
+    out[lane.id] = columns
+      .filter((c) => c.lane_id === lane.id)
+      .sort((a, b) => a.position - b.position)
+      .map((c) => ({ key: c.id, id: c.id, name: c.name, semantic: c.semantic }));
+  }
+  return out;
+}
+
+/** Policy drafts keyed by column key, which for a saved column is its id. */
 function initialPolicies(columns: Column[], policies: ColumnPolicy[]): Record<string, PolicyDraft[]> {
   const out: Record<string, PolicyDraft[]> = {};
   for (const c of columns) {
@@ -222,7 +329,8 @@ function initialPolicies(columns: Column[], policies: ColumnPolicy[]): Record<st
 
 /**
  * One column's policies: create / edit / delete / reorder, split by the moment
- * they apply. Ordering within a group is what the move checklist follows.
+ * they apply. These belong to THIS lane's column — a same-named column in
+ * another lane is a different column with its own policies.
  */
 function PolicyEditor({
   columnName,
@@ -251,7 +359,7 @@ function PolicyEditor({
     <div className="bg-gray-50 border rounded p-3 space-y-3">
       <p className="text-xs text-gray-500">
         A policy is a checklist item. Every applicable policy must be ticked before the card moves; skipping one needs an
-        explicit override, which is recorded.
+        explicit override with a written reason, which is recorded.
       </p>
       {groups.map((g) => {
         const items = policies.filter((p) => p.kind === g.kind);

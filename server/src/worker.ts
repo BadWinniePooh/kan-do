@@ -15,6 +15,7 @@ import { createBoss, QUEUES, scheduleReopen } from './jobs/queue.js';
 import { createNotifyRealtime } from './realtime/bridge.js';
 import type { AppCtx } from './services/context.js';
 import { moveCard } from './services/cards.js';
+import { openColumnOfLane } from './services/boards.js';
 import { notifyCardEvent } from './services/notify.js';
 import * as rec from './domain/recurrence.js';
 
@@ -49,20 +50,15 @@ async function main(): Promise<void> {
       log.info({ cardId }, 'reopen no longer due (card state changed) — skipping');
       return;
     }
-    const openColumn = await db
-      .selectFrom('board_columns')
-      .select('id')
-      .where('board_id', '=', card.board_id)
-      .where('semantic', '=', 'open')
-      .orderBy('position')
-      .executeTakeFirst();
-    if (!openColumn) {
-      log.error({ cardId, boardId: card.board_id }, 'board has no open column');
+    // columns are lane-scoped: reopen into the card's OWN lane's open column
+    const openColumnId = await openColumnOfLane(db, card.lane_id);
+    if (!openColumnId) {
+      log.error({ cardId, laneId: card.lane_id }, 'lane has no open column');
       return;
     }
     // actor null = system move; moveCard runs the onReopened branch,
     // arms the overdue deadline and schedules the overdue check
-    await moveCard(ctx, null, cardId, openColumn.id);
+    await moveCard(ctx, null, cardId, openColumnId);
     await notifyCardEvent(ctx, 'reopen', cardId, `reopen:${cardId}:${reopenAt}`);
     log.info({ cardId }, 'recurring card reopened');
   });
@@ -107,7 +103,9 @@ async function main(): Promise<void> {
       .where('cards.due_date', '<', now)
       .where('cards.is_overdue', '=', false)
       .where('cards.recurrence_rule', 'is', null)
-      .where((eb) => eb.or([eb('board_columns.semantic', 'is', null), eb('board_columns.semantic', '!=', 'done')]))
+      // a card that is finished — successfully (done) or reverted (discard) —
+      // is not late; only live work can go overdue
+      .where((eb) => eb.or([eb('board_columns.semantic', 'is', null), eb('board_columns.semantic', 'not in', ['done', 'discard'])]))
       .execute();
     for (const card of due) {
       await db.updateTable('cards').set({ is_overdue: true, updated_at: now }).where('id', '=', card.id).execute();

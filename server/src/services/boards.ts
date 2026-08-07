@@ -32,6 +32,16 @@ export async function listBoards(ctx: AppCtx, actor: Actor) {
     .execute();
 }
 
+/**
+ * The column set a brand-new lane starts with. Every lane must independently
+ * satisfy the open+done invariant, so a lane can never exist without them.
+ */
+export const DEFAULT_LANE_COLUMNS: { name: string; position: number; semantic: 'open' | 'done' | null }[] = [
+  { name: 'Open', position: 0, semantic: 'open' },
+  { name: 'In progress', position: 1, semantic: null },
+  { name: 'Done', position: 2, semantic: 'done' },
+];
+
 export async function createBoard(ctx: AppCtx, actor: Actor, name: string) {
   if (!actor.orgId || !canCreateBoard(actor, actor.orgId)) throw forbidden();
   return ctx.db.transaction().execute(async (trx) => {
@@ -41,14 +51,16 @@ export async function createBoard(ctx: AppCtx, actor: Actor, name: string) {
       .returningAll()
       .executeTakeFirstOrThrow();
     await trx.insertInto('board_members').values({ board_id: board.id, user_id: actor.userId, is_owner: true }).execute();
-    // every board starts with a guaranteed open + done column
+    // columns live on lanes, so a board starts with one lane carrying the
+    // guaranteed open + done pair
+    const lane = await trx
+      .insertInto('lanes')
+      .values({ board_id: board.id, name: 'Default', position: 0 })
+      .returning('id')
+      .executeTakeFirstOrThrow();
     await trx
       .insertInto('board_columns')
-      .values([
-        { board_id: board.id, name: 'Open', position: 0, semantic: 'open' },
-        { board_id: board.id, name: 'In progress', position: 1, semantic: null },
-        { board_id: board.id, name: 'Done', position: 2, semantic: 'done' },
-      ])
+      .values(DEFAULT_LANE_COLUMNS.map((c) => ({ ...c, board_id: board.id, lane_id: lane.id })))
       .execute();
     return board;
   });
@@ -59,7 +71,16 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
   const orgIdRow = await ctx.db.selectFrom('boards').select('org_id').where('id', '=', boardId).executeTakeFirstOrThrow();
   const [board, columns, lanes, members, cards, categories, policies] = await Promise.all([
     ctx.db.selectFrom('boards').selectAll().where('id', '=', boardId).executeTakeFirstOrThrow(),
-    ctx.db.selectFrom('board_columns').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
+    // lane-scoped: ordered by lane then position, so the client can group
+    // straight into per-lane column strips
+    ctx.db
+      .selectFrom('board_columns')
+      .innerJoin('lanes', 'lanes.id', 'board_columns.lane_id')
+      .selectAll('board_columns')
+      .where('board_columns.board_id', '=', boardId)
+      .orderBy('lanes.position')
+      .orderBy('board_columns.position')
+      .execute(),
     ctx.db.selectFrom('lanes').selectAll().where('board_id', '=', boardId).orderBy('position').execute(),
     ctx.db
       .selectFrom('board_members')
@@ -140,17 +161,24 @@ export interface ColumnInput {
   id?: string;
   name: string;
   position: number;
-  semantic: 'open' | 'done' | null;
+  semantic: 'open' | 'done' | 'discard' | null;
 }
 
-/** Replace-style column update; enforces the open/done invariant. */
-export async function saveColumns(ctx: AppCtx, actor: Actor, boardId: string, columns: ColumnInput[]) {
+/**
+ * Replace-style column update for ONE lane. Columns are lane-scoped, so two
+ * lanes on the same board may have entirely different columns — and the
+ * open+done invariant is checked per lane, not per board. 'discard' is optional
+ * and a lane may have several plain columns or none.
+ */
+export async function saveColumns(ctx: AppCtx, actor: Actor, boardId: string, laneId: string, columns: ColumnInput[]) {
   await assertBoardAccess(ctx.db, actor, boardId, 'edit');
+  const lane = await ctx.db.selectFrom('lanes').select(['id', 'board_id']).where('id', '=', laneId).executeTakeFirst();
+  if (!lane || lane.board_id !== boardId) throw badRequest('lane does not belong to board');
   if (!columns.some((c) => c.semantic === 'open') || !columns.some((c) => c.semantic === 'done')) {
-    throw badRequest('board must keep at least one "open" and one "done" column');
+    throw badRequest('every lane must keep at least one "open" and one "done" column');
   }
   const result = await ctx.db.transaction().execute(async (trx) => {
-    const existing = await trx.selectFrom('board_columns').select('id').where('board_id', '=', boardId).execute();
+    const existing = await trx.selectFrom('board_columns').select('id').where('lane_id', '=', laneId).execute();
     const keepIds = new Set(columns.filter((c) => c.id).map((c) => c.id!));
     const toDelete = existing.filter((e) => !keepIds.has(e.id)).map((e) => e.id);
     if (toDelete.length) {
@@ -171,7 +199,8 @@ export async function saveColumns(ctx: AppCtx, actor: Actor, boardId: string, co
             .updateTable('board_columns')
             .set({ name: c.name, position: c.position, semantic: c.semantic, updated_at: new Date() })
             .where('id', '=', c.id)
-            .where('board_id', '=', boardId)
+            // scoped to the lane: a column can never be re-homed into another one
+            .where('lane_id', '=', laneId)
             .returningAll()
             .executeTakeFirstOrThrow(),
         );
@@ -179,7 +208,7 @@ export async function saveColumns(ctx: AppCtx, actor: Actor, boardId: string, co
         out.push(
           await trx
             .insertInto('board_columns')
-            .values({ board_id: boardId, name: c.name, position: c.position, semantic: c.semantic })
+            .values({ board_id: boardId, lane_id: laneId, name: c.name, position: c.position, semantic: c.semantic })
             .returningAll()
             .executeTakeFirstOrThrow(),
         );
@@ -192,49 +221,50 @@ export async function saveColumns(ctx: AppCtx, actor: Actor, boardId: string, co
 }
 
 /**
- * Lane invariant: once a board has >=1 lane, every card on it has a valid
- * lane; with zero lanes, all cards have lane_id NULL (one implicit lane).
- * Enforced here (first-lane backfill, orphan reassignment after deletes) and
- * in the card service on create/move/update — a card can never end up hidden
- * from every lane view.
+ * Lane invariants, now that columns hang off lanes:
+ *  - a board always has at least one lane (a column has nowhere else to live);
+ *  - a new lane is born with its own open/done column pair, so it is valid the
+ *    instant it exists rather than only after a follow-up column save;
+ *  - a lane holding cards cannot be deleted — deleting it would take its
+ *    columns, and with them the cards' placement. The caller moves the cards
+ *    out first, deliberately.
  */
 export async function saveLanes(ctx: AppCtx, actor: Actor, boardId: string, lanes: { id?: string; name: string; position: number }[]) {
   await assertBoardAccess(ctx.db, actor, boardId, 'edit');
+  if (lanes.length === 0) throw badRequest('a board must keep at least one lane');
   const result = await ctx.db.transaction().execute(async (trx) => {
     const existing = await trx.selectFrom('lanes').select('id').where('board_id', '=', boardId).execute();
     const keep = new Set(lanes.filter((l) => l.id).map((l) => l.id!));
     const toDelete = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
-    if (toDelete.length) await trx.deleteFrom('lanes').where('id', 'in', toDelete).execute();
+    if (toDelete.length) {
+      const occupied = await trx.selectFrom('cards').select('id').where('lane_id', 'in', toDelete).limit(1).executeTakeFirst();
+      if (occupied) throw badRequest('cannot delete a lane that still holds cards — move them to another lane first');
+      await trx.deleteFrom('lanes').where('id', 'in', toDelete).execute();
+    }
     const out: { id: string; board_id: string; name: string; position: number }[] = [];
     for (const l of [...lanes].sort((a, b) => a.position - b.position)) {
-      out.push(
-        l.id
-          ? await trx
-              .updateTable('lanes')
-              .set({ name: l.name, position: l.position, updated_at: new Date() })
-              .where('id', '=', l.id)
-              .where('board_id', '=', boardId)
-              .returningAll()
-              .executeTakeFirstOrThrow()
-          : await trx
-              .insertInto('lanes')
-              .values({ board_id: boardId, name: l.name, position: l.position })
-              .returningAll()
-              .executeTakeFirstOrThrow(),
-      );
-    }
-    if (out.length > 0) {
-      // backfill lane-less cards (board's first lane ever, or orphans left by
-      // lane deletion — the FK sets them NULL inside this transaction)
-      const first = out[0]!;
-      await trx
-        .updateTable('cards')
-        .set({ lane_id: first.id, updated_at: new Date() })
-        .where('board_id', '=', boardId)
-        .where((eb) =>
-          eb.or([eb('lane_id', 'is', null), eb('lane_id', 'not in', out.map((l) => l.id))]),
-        )
-        .execute();
+      if (l.id) {
+        out.push(
+          await trx
+            .updateTable('lanes')
+            .set({ name: l.name, position: l.position, updated_at: new Date() })
+            .where('id', '=', l.id)
+            .where('board_id', '=', boardId)
+            .returningAll()
+            .executeTakeFirstOrThrow(),
+        );
+      } else {
+        const lane = await trx
+          .insertInto('lanes')
+          .values({ board_id: boardId, name: l.name, position: l.position })
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        await trx
+          .insertInto('board_columns')
+          .values(DEFAULT_LANE_COLUMNS.map((c) => ({ ...c, board_id: boardId, lane_id: lane.id })))
+          .execute();
+        out.push(lane);
+      }
     }
     return out;
   });
@@ -242,7 +272,7 @@ export async function saveLanes(ctx: AppCtx, actor: Actor, boardId: string, lane
   return result;
 }
 
-/** First lane (by position) of a board, or null when the board has no lanes. */
+/** First lane (by position) of a board. Every board has one. */
 export async function firstLaneId(db: Db, boardId: string): Promise<string | null> {
   const lane = await db
     .selectFrom('lanes')
@@ -252,6 +282,21 @@ export async function firstLaneId(db: Db, boardId: string): Promise<string | nul
     .orderBy('created_at')
     .executeTakeFirst();
   return lane?.id ?? null;
+}
+
+/**
+ * A lane's open-mapped column — where a card lands when it is (re)opened.
+ * Per lane, because column identity is lane-scoped now.
+ */
+export async function openColumnOfLane(db: Db, laneId: string): Promise<string | null> {
+  const col = await db
+    .selectFrom('board_columns')
+    .select('id')
+    .where('lane_id', '=', laneId)
+    .where('semantic', '=', 'open')
+    .orderBy('position')
+    .executeTakeFirst();
+  return col?.id ?? null;
 }
 
 export async function addBoardMember(ctx: AppCtx, actor: Actor, boardId: string, userId: string) {
