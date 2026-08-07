@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { get, post, put } from '../api';
 import type { BoardDetail, Card, OwnerRow } from '../types';
+import { useDismiss } from '../useDismiss';
 
 interface ExternalOwner {
   id: string;
@@ -21,6 +22,7 @@ export default function OwnerPicker({
   onChanged: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const ref = useDismiss<HTMLDivElement>(() => setOpen(false), open);
   const [newExternal, setNewExternal] = useState('');
   const [error, setError] = useState<string | null>(null);
   const { data: externals = [], refetch } = useQuery<ExternalOwner[]>({
@@ -55,7 +57,7 @@ export default function OwnerPicker({
   };
 
   return (
-    <div className="relative">
+    <div className="relative" ref={ref}>
       <button
         aria-expanded={open}
         onClick={() => setOpen(!open)}

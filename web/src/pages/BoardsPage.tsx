@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { get, post } from '../api';
 import type { Board } from '../types';
+import { TileSkeleton } from '../components/Loading';
 
 export default function BoardsPage() {
   const qc = useQueryClient();
@@ -50,7 +51,7 @@ export default function BoardsPage() {
         </p>
       )}
       {isLoading ? (
-        <p className="text-gray-500">Loading…</p>
+        <TileSkeleton rows={3} />
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2">
           {boards.map((b) => (

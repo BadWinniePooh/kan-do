@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { put } from '../api';
 import type { BoardDetail } from '../types';
+import { useDismiss } from '../useDismiss';
 
 interface ColDraft {
   id?: string;
@@ -24,6 +25,7 @@ export default function ColumnEditor({ board, onClose }: { board: BoardDetail; o
   const [cols, setCols] = useState<ColDraft[]>(board.columns.map((c) => ({ id: c.id, name: c.name, semantic: c.semantic })));
   const [lanes, setLanes] = useState<LaneDraft[]>(board.lanes.map((l) => ({ id: l.id, name: l.name })));
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useDismiss<HTMLDivElement>(onClose);
 
   const missingOpen = !cols.some((c) => c.semantic === 'open');
   const missingDone = !cols.some((c) => c.semantic === 'done');
@@ -51,6 +53,7 @@ export default function ColumnEditor({ board, onClose }: { board: BoardDetail; o
   return (
     <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center pt-10 px-4" onClick={onClose}>
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Edit columns and lanes"

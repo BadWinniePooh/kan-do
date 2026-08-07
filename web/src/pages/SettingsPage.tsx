@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { get, put, post, patch } from '../api';
+import { get, put, patch } from '../api';
 import type { Me } from '../types';
+import { initialsOf } from '@kan-do/shared';
+import AvatarEditor from '../components/AvatarEditor';
 
 interface Setting {
   event: 'overdue' | 'reopen';
@@ -27,6 +29,7 @@ export default function SettingsPage({ me }: { me: Me }) {
   });
   const [error, setError] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(me.displayName);
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
 
   const isEnabled = (event: string, channel: string) =>
     settings.find((s) => s.event === event && s.channel === channel)?.enabled ?? true;
@@ -36,23 +39,6 @@ export default function SettingsPage({ me }: { me: Me }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['notification-settings'] }),
     onError: (e) => setError(e.message),
   });
-
-  const uploadAvatar = async (file: File) => {
-    setError(null);
-    try {
-      const { key, uploadUrl } = await post<{ key: string; uploadUrl: string }>('/api/me/uploads/presign', {
-        filename: file.name,
-        contentType: file.type,
-        purpose: 'avatar',
-      });
-      const res = await fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': file.type } });
-      if (!res.ok) throw new Error(`upload failed (${res.status})`);
-      await patch('/api/me/profile', { avatarKey: key });
-      await qc.invalidateQueries({ queryKey: ['me'] });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'avatar upload failed');
-    }
-  };
 
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-8">
@@ -81,18 +67,44 @@ export default function SettingsPage({ me }: { me: Me }) {
               </button>
             </div>
           </label>
-          <label className="block text-sm">
-            Profile picture
-            <input
-              type="file"
-              accept="image/*"
-              className="block mt-1 text-sm"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void uploadAvatar(f);
+          <div className="text-sm">
+            <p className="mb-1">Profile picture</p>
+            <div className="flex items-center gap-4">
+              {me.avatarUrl ? (
+                <img src={me.avatarUrl} alt="Your current profile picture" className="w-16 h-16 rounded-full object-cover ring-1 ring-slate-300" />
+              ) : (
+                <span
+                  aria-label="Your current badge (initials)"
+                  className="w-16 h-16 rounded-full bg-blue-600 text-white flex items-center justify-center text-xl font-semibold"
+                >
+                  {initialsOf(me.displayName)}
+                </span>
+              )}
+              <label className="border rounded px-3 py-1.5 bg-white hover:bg-gray-50 cursor-pointer">
+                {me.avatarUrl ? 'Change picture…' : 'Upload picture…'}
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) setAvatarFile(f);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+          </div>
+          {avatarFile && (
+            <AvatarEditor
+              file={avatarFile}
+              onClose={() => setAvatarFile(null)}
+              onSaved={() => {
+                setAvatarFile(null);
+                void qc.invalidateQueries({ queryKey: ['me'] });
               }}
             />
-          </label>
+          )}
         </div>
       </section>
 

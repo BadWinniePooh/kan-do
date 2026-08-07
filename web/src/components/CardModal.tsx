@@ -7,6 +7,7 @@ import type { BoardDetail, CardDetail } from '../types';
 import OwnerBadge from './OwnerBadge';
 import RecurrenceBuilder from './RecurrenceBuilder';
 import OwnerPicker from './OwnerPicker';
+import { Spinner } from './Loading';
 
 export default function CardModal({ cardId, board, onClose }: { cardId: string; board: BoardDetail; onClose: () => void }) {
   const qc = useQueryClient();
@@ -36,7 +37,14 @@ export default function CardModal({ cardId, board, onClose }: { cardId: string; 
         <p role="alert" className="p-6 text-red-700">⚠ Could not load card: {String(error)}</p>
       </Overlay>
     );
-  if (!data) return null;
+  if (!data)
+    return (
+      <Overlay onClose={onClose}>
+        <div className="bg-white rounded-xl shadow-xl p-10">
+          <Spinner label="Loading card" />
+        </div>
+      </Overlay>
+    );
   const { card } = data;
 
   return (
@@ -333,7 +341,14 @@ function Notes({ cardId, notes, onChanged }: { cardId: string; notes: CardDetail
                 >
                   edit markdown
                 </button>
-                <button className="underline text-red-700" onClick={() => run(del(`/api/cards/${cardId}/notes/${n.id}`))}>
+                <button
+                  className="underline text-red-700"
+                  onClick={() => {
+                    if (window.confirm('Delete this note? This cannot be undone.')) {
+                      void run(del(`/api/cards/${cardId}/notes/${n.id}`));
+                    }
+                  }}
+                >
                   delete
                 </button>
               </div>

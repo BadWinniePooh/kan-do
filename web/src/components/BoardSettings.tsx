@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { get, post, patch, del } from '../api';
 import type { BoardDetail, Me } from '../types';
 import { initialsOf } from '@kan-do/shared';
+import { useDismiss } from '../useDismiss';
 
 interface OrgUserLite {
   id: string;
@@ -24,6 +25,7 @@ export default function BoardSettings({ board, onClose }: { board: BoardDetail; 
   const [name, setName] = useState(board.board.name);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const dialogRef = useDismiss<HTMLDivElement>(onClose);
 
   const isOwner = board.members.some((m) => m.id === me?.id && m.is_owner);
   const memberIds = new Set(board.members.map((m) => m.id));
@@ -61,6 +63,7 @@ export default function BoardSettings({ board, onClose }: { board: BoardDetail; 
   return (
     <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center pt-10 px-4" onClick={onClose}>
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Board settings"

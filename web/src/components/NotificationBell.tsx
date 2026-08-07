@@ -2,9 +2,11 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { get, post } from '../api';
 import type { AppNotification } from '../types';
+import { useDismiss } from '../useDismiss';
 
 export default function NotificationBell() {
   const [open, setOpen] = useState(false);
+  const ref = useDismiss<HTMLDivElement>(() => setOpen(false), open);
   const qc = useQueryClient();
   const { data: notifications = [] } = useQuery<AppNotification[]>({
     queryKey: ['notifications'],
@@ -17,7 +19,7 @@ export default function NotificationBell() {
   });
 
   return (
-    <div className="relative">
+    <div className="relative" ref={ref}>
       <button
         aria-label={`Notifications, ${unread.length} unread`}
         aria-expanded={open}

@@ -238,6 +238,7 @@ function ExternalOwnersSection({ orgId }: { orgId: string }) {
             <button
               className="ml-auto text-xs text-red-700 underline"
               onClick={() =>
+                window.confirm(`Remove external owner "${x.display_name}"? They will disappear from all cards.`) &&
                 del(`/api/orgs/${orgId}/external-owners/${x.id}`)
                   .then(() => {
                     setError(null);

@@ -86,6 +86,16 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
         .where('card_owners.card_id', 'in', cardIds)
         .execute()
     : [];
+  // avatar_key is an object-storage key, not a URL — presign before it
+  // reaches any <img src>. One signature per distinct key.
+  const avatarUrls = new Map<string, string>();
+  for (const key of new Set(owners.map((o) => o.user_avatar).filter((k): k is string => !!k))) {
+    avatarUrls.set(key, await ctx.storage.presignDownload(key));
+  }
+  const ownersWithUrls = owners.map((o) => ({
+    ...o,
+    user_avatar: o.user_avatar ? (avatarUrls.get(o.user_avatar) ?? null) : null,
+  }));
   const coveredCards = cards.filter((c) => c.cover_attachment_id);
   const covers: Record<string, string> = {};
   if (coveredCards.length) {
@@ -100,7 +110,7 @@ export async function getBoardDetail(ctx: AppCtx, actor: Actor, boardId: string)
       if (key) covers[c.id] = await ctx.storage.presignDownload(key);
     }
   }
-  return { board, columns, lanes, members, cards, owners, covers };
+  return { board, columns, lanes, members, cards, owners: ownersWithUrls, covers };
 }
 
 export async function updateBoard(ctx: AppCtx, actor: Actor, boardId: string, patch: { name?: string }) {
@@ -170,6 +180,13 @@ export async function saveColumns(ctx: AppCtx, actor: Actor, boardId: string, co
   return result;
 }
 
+/**
+ * Lane invariant: once a board has >=1 lane, every card on it has a valid
+ * lane; with zero lanes, all cards have lane_id NULL (one implicit lane).
+ * Enforced here (first-lane backfill, orphan reassignment after deletes) and
+ * in the card service on create/move/update — a card can never end up hidden
+ * from every lane view.
+ */
 export async function saveLanes(ctx: AppCtx, actor: Actor, boardId: string, lanes: { id?: string; name: string; position: number }[]) {
   await assertBoardAccess(ctx.db, actor, boardId, 'edit');
   const result = await ctx.db.transaction().execute(async (trx) => {
@@ -177,8 +194,8 @@ export async function saveLanes(ctx: AppCtx, actor: Actor, boardId: string, lane
     const keep = new Set(lanes.filter((l) => l.id).map((l) => l.id!));
     const toDelete = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
     if (toDelete.length) await trx.deleteFrom('lanes').where('id', 'in', toDelete).execute();
-    const out = [];
-    for (const l of lanes) {
+    const out: { id: string; board_id: string; name: string; position: number }[] = [];
+    for (const l of [...lanes].sort((a, b) => a.position - b.position)) {
       out.push(
         l.id
           ? await trx
@@ -195,10 +212,35 @@ export async function saveLanes(ctx: AppCtx, actor: Actor, boardId: string, lane
               .executeTakeFirstOrThrow(),
       );
     }
+    if (out.length > 0) {
+      // backfill lane-less cards (board's first lane ever, or orphans left by
+      // lane deletion — the FK sets them NULL inside this transaction)
+      const first = out[0]!;
+      await trx
+        .updateTable('cards')
+        .set({ lane_id: first.id, updated_at: new Date() })
+        .where('board_id', '=', boardId)
+        .where((eb) =>
+          eb.or([eb('lane_id', 'is', null), eb('lane_id', 'not in', out.map((l) => l.id))]),
+        )
+        .execute();
+    }
     return out;
   });
   ctx.realtime.emitToBoard(boardId, { type: 'lane.changed' });
   return result;
+}
+
+/** First lane (by position) of a board, or null when the board has no lanes. */
+export async function firstLaneId(db: Db, boardId: string): Promise<string | null> {
+  const lane = await db
+    .selectFrom('lanes')
+    .select('id')
+    .where('board_id', '=', boardId)
+    .orderBy('position')
+    .orderBy('created_at')
+    .executeTakeFirst();
+  return lane?.id ?? null;
 }
 
 export async function addBoardMember(ctx: AppCtx, actor: Actor, boardId: string, userId: string) {

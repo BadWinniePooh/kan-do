@@ -10,7 +10,7 @@ import * as rec from '../domain/recurrence.js';
 import type { RecurrenceRule } from '@kan-do/shared';
 import type { AppCtx } from './context.js';
 import { badRequest, forbidden, notFound } from './context.js';
-import { assertBoardAccess } from './boards.js';
+import { assertBoardAccess, firstLaneId } from './boards.js';
 import { scheduleOverdueCheck, scheduleReopen } from '../jobs/queue.js';
 
 async function assertCardEdit(ctx: AppCtx, actor: Actor, cardId: string) {
@@ -44,13 +44,16 @@ export async function createCard(ctx: AppCtx, actor: Actor, input: CardCreateInp
     .executeTakeFirst();
   if (!column || column.board_id !== input.boardId) throw badRequest('column does not belong to board');
 
+  // lane invariant: on a board with lanes, a new card always lands in one
+  const laneId = input.laneId ?? (await firstLaneId(ctx.db, input.boardId));
+
   const card = await ctx.db.transaction().execute(async (trx) => {
     const c = await trx
       .insertInto('cards')
       .values({
         board_id: input.boardId,
         column_id: input.columnId,
-        lane_id: input.laneId ?? null,
+        lane_id: laneId,
         title: input.title,
         description: input.description ?? null,
         position: input.position ?? Date.now(),
@@ -82,7 +85,10 @@ export async function updateCard(ctx: AppCtx, actor: Actor, cardId: string, patc
   const set: Record<string, unknown> = { updated_at: new Date() };
   if (patch.title !== undefined) set.title = patch.title;
   if (patch.description !== undefined) set.description = patch.description;
-  if (patch.laneId !== undefined) set.lane_id = patch.laneId;
+  if (patch.laneId !== undefined) {
+    // never allow a card to go lane-less while the board has lanes
+    set.lane_id = patch.laneId ?? (await firstLaneId(ctx.db, card.board_id));
+  }
   if (patch.coverAttachmentId !== undefined) set.cover_attachment_id = patch.coverAttachmentId;
   if (patch.dueDate !== undefined) {
     set.due_date = patch.dueDate ? new Date(patch.dueDate) : null;
@@ -141,7 +147,9 @@ export async function moveCard(
     column_id: toColumnId,
     updated_at: now,
   };
-  if (opts.laneId !== undefined) set.lane_id = opts.laneId;
+  if (opts.laneId !== undefined) {
+    set.lane_id = opts.laneId ?? (await firstLaneId(db, card.board_id));
+  }
   if (opts.position !== undefined) set.position = opts.position;
 
   let reopenToSchedule: Date | null = null;
@@ -254,7 +262,13 @@ export async function getCardDetail(ctx: AppCtx, actor: Actor, cardId: string) {
   const withUrls = await Promise.all(
     attachments.map(async (a) => ({ ...a, url: await ctx.storage.presignDownload(a.object_key) })),
   );
-  return { card, notes, attachments: withUrls, owners, transitions };
+  const ownersWithUrls = await Promise.all(
+    owners.map(async (o) => ({
+      ...o,
+      user_avatar: o.user_avatar ? await ctx.storage.presignDownload(o.user_avatar) : null,
+    })),
+  );
+  return { card, notes, attachments: withUrls, owners: ownersWithUrls, transitions };
 }
 
 export async function addNote(ctx: AppCtx, actor: Actor, cardId: string, markdown: string) {

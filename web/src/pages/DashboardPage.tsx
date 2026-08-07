@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import { get, put } from '../api';
 import type { Board } from '../types';
+import { TileSkeleton } from '../components/Loading';
 
 /* Validated reference palette (dataviz skill): single-series marks use
  * categorical slot 1; status-critical for overdue; ink/grid from chrome table. */
@@ -148,9 +149,9 @@ export default function DashboardPage() {
       {error && (
         <p role="alert" className="text-red-700 text-sm">⚠ Could not load metrics: {String(error)}</p>
       )}
-      {!metrics ? (
-        <p className="text-gray-500">Loading metrics…</p>
-      ) : (
+      {!metrics && !error ? (
+        <TileSkeleton rows={3} />
+      ) : !metrics ? null : (
         <div className="grid grid-cols-12 gap-4">
           {layout.map((item) => (
             <div key={item.id} className={`col-span-12 md:col-span-${item.w}`} style={{ gridColumn: `span ${item.w} / span ${item.w}` }}>

@@ -20,6 +20,8 @@ import CardTile from '../components/CardTile';
 import CardModal from '../components/CardModal';
 import ColumnEditor from '../components/ColumnEditor';
 import BoardSettings from '../components/BoardSettings';
+import { BoardSkeleton } from '../components/Loading';
+import { useDismiss } from '../useDismiss';
 
 type BoardDetailWithCovers = BoardDetail & { covers: Record<string, string> };
 
@@ -86,10 +88,15 @@ export default function BoardPage() {
     move.mutate({ cardId: card.id, toColumnId: target.columnId, laneId: target.laneId });
   };
 
-  if (isLoading) return <p className="p-6 text-gray-500">Loading board…</p>;
+  if (isLoading) return <BoardSkeleton />;
   if (error || !data) return <p className="p-6 text-red-700" role="alert">⚠ Could not load board: {String(error)}</p>;
 
   const lanes = data.lanes.length ? data.lanes : [{ id: null as string | null, name: '', position: 0 }];
+  // safety net for the lane invariant: a card whose lane is unknown (races,
+  // stale cache) renders in the first lane instead of disappearing
+  const laneIds = new Set(data.lanes.map((l) => l.id));
+  const effectiveLane = (c: Card): string | null =>
+    data.lanes.length === 0 ? null : c.lane_id && laneIds.has(c.lane_id) ? c.lane_id : data.lanes[0]!.id;
 
   return (
     <div className="p-4 h-full">
@@ -138,7 +145,7 @@ export default function BoardPage() {
                     </header>
                     <div className="space-y-2 min-h-[3rem]">
                       {data.cards
-                        .filter((c) => c.column_id === col.id && (c.lane_id ?? null) === lane.id)
+                        .filter((c) => c.column_id === col.id && effectiveLane(c) === lane.id)
                         .sort((a, b) => a.position - b.position)
                         .map((card) => (
                           <CardTile
@@ -211,6 +218,7 @@ function QuickAdd({
 }) {
   const [title, setTitle] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const formRef = useDismiss<HTMLFormElement>(onDone);
   const create = useMutation({
     mutationFn: () => post('/api/cards', { boardId, columnId, laneId, title: title.trim() }),
     onSuccess: onDone,
@@ -218,10 +226,11 @@ function QuickAdd({
   });
   return (
     <form
+      ref={formRef}
       className="mt-2"
       onSubmit={(e) => {
         e.preventDefault();
-        if (title.trim()) create.mutate();
+        if (title.trim() && !create.isPending) create.mutate();
       }}
     >
       <label className="sr-only" htmlFor={`qa-${columnId}`}>
@@ -231,10 +240,10 @@ function QuickAdd({
         id={`qa-${columnId}`}
         autoFocus
         value={title}
+        disabled={create.isPending}
         onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => e.key === 'Escape' && onDone()}
         placeholder="Card title, Enter to add"
-        className="w-full border rounded px-2 py-1 text-sm"
+        className="w-full border rounded px-2 py-1 text-sm disabled:opacity-50"
       />
       {error && (
         <p role="alert" className="text-xs text-red-700 mt-1">

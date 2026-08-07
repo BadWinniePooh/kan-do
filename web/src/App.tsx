@@ -10,6 +10,7 @@ import SettingsPage from './pages/SettingsPage';
 import OrgAdminPage from './pages/OrgAdminPage';
 import GlobalAdminPage from './pages/GlobalAdminPage';
 import NotificationBell from './components/NotificationBell';
+import { Spinner } from './components/Loading';
 import { useNotificationRealtime } from './realtime';
 
 export default function App() {
@@ -20,8 +21,22 @@ export default function App() {
   });
   useNotificationRealtime();
 
-  if (isLoading) return <div className="p-8 text-gray-500">Loading…</div>;
-  if (!me) return <LoginPage />;
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" aria-busy="true">
+        <Spinner label="Loading Kan-Do" />
+      </div>
+    );
+  }
+  // logged out: /login is the only route; every protected path redirects there
+  if (!me) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
 
   // Role tiers get separate UIs: global admin never sees boards UI.
   if (me.role === 'global_admin') {
@@ -29,6 +44,7 @@ export default function App() {
       <Shell me={me} nav={[{ to: '/admin', label: 'Organizations' }]}>
         <Routes>
           <Route path="/admin" element={<GlobalAdminPage />} />
+          <Route path="/login" element={<Navigate to="/admin" replace />} />
           <Route path="*" element={<Navigate to="/admin" replace />} />
         </Routes>
       </Shell>
@@ -50,6 +66,7 @@ export default function App() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/settings" element={<SettingsPage me={me} />} />
         {me.role === 'org_admin' && <Route path="/org-admin" element={<OrgAdminPage me={me} />} />}
+        <Route path="/login" element={<Navigate to="/boards" replace />} />
         <Route path="*" element={<Navigate to="/boards" replace />} />
       </Routes>
     </Shell>
@@ -60,7 +77,7 @@ function Shell({ me, nav, children }: { me: Me; nav: { to: string; label: string
   const logout = async () => {
     await post('/api/auth/logout');
     // hard reload: guarantees every cache and socket is dropped with the session
-    window.location.assign('/');
+    window.location.assign('/login');
   };
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col">
