@@ -82,10 +82,20 @@ jobs:
           category: /language:javascript-typescript
 
   # Flags dependencies a PR would newly introduce. PR-only: it diffs base vs head.
+  #
+  # Needs the repository's "Dependency graph" setting to be on
+  # (Settings -> Advanced Security -> Dependency graph). Until it is, the action
+  # exits with "Dependency review is not supported on this repository", which is a
+  # missing repo feature rather than a real finding -- so this job is advisory for
+  # now. Turn the setting on, then delete the continue-on-error line to make it a
+  # blocking gate. The `audit` job above already hard-fails on high/critical, so
+  # the tree is still gated meanwhile; what is deferred is the base-vs-head diff
+  # that catches a newly introduced vulnerable dependency.
   dependency-review:
     name: Dependency review
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/dependency-review-action@v4
