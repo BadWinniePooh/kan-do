@@ -10,3 +10,4 @@ web/android/app/build/
 web/android/.gradle/
 .DS_Store
 claude.resume
+audit.json

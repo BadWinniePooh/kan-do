@@ -16,6 +16,7 @@ import {
   PieChart,
   Pie,
   Cell,
+  type TooltipValueType,
 } from 'recharts';
 import { get, post, put } from '../api';
 import type { Board } from '../types';
@@ -862,7 +863,12 @@ function SingleSeriesView({ def, rows, subtitle }: { def: CustomDef; rows: Pivot
 
   const chartData = rows.map((r) => ({ name: r.keys[0]!, value: toPlot(def.metric, r.value) ?? 0 }));
   const unit = unitOf(def.metric);
-  const tooltipFmt = (v: number) => [`${v}${unit}`, METRIC_LABELS[def.metric]];
+  // recharts 3 widened the tooltip formatter: value is ValueType | undefined and
+  // the tuple form must be [ReactNode, NameType]
+  const tooltipFmt = (v: TooltipValueType | undefined): [string, string] => [
+    `${v ?? ''}${unit}`,
+    METRIC_LABELS[def.metric],
+  ];
 
   return (
     <ChartCard title={def.title} subtitle={`${subtitle}${unit ? ' (hours)' : ''}`}>
@@ -934,9 +940,9 @@ function MultiSeriesView({ def, data, subtitle }: { def: CustomDef; data: MultiP
     return row;
   });
   const color = (i: number) => SERIES[i % SERIES.length]!;
-  const tooltipFmt = (v: number, name: string) => {
+  const tooltipFmt = (v: TooltipValueType | undefined, name: string | number | undefined): [string, string] => {
     const idx = series.findIndex((s) => s.label === name);
-    return [`${v}${idx >= 0 ? unitOf(series[idx]!.metric) : ''}`, name];
+    return [`${v ?? ''}${idx >= 0 ? unitOf(series[idx]!.metric) : ''}`, String(name ?? '')];
   };
 
   if (def.viz === 'table') {
@@ -1116,7 +1122,10 @@ function Widget({
                 <YAxis tick={{ fill: C.muted, fontSize: 12 }} axisLine={false} tickLine={false} width={36} />
                 <Tooltip
                   cursor={{ fill: 'rgba(42,120,214,0.08)' }}
-                  formatter={(v: number) => [`${v} h`, 'mean dwell — long bars here suggest a bottleneck']}
+                  formatter={(v: TooltipValueType | undefined): [string, string] => [
+                    `${v ?? ''} h`,
+                    'mean dwell — long bars here suggest a bottleneck',
+                  ]}
                   contentStyle={{ fontSize: 12, borderRadius: 8 }}
                 />
                 <Bar dataKey="hours" fill={C.series1} radius={[4, 4, 0, 0]} maxBarSize={40} />

@@ -1,6 +1,23 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+/* v4 detects sources automatically; these mirror the old config's `content`
+ * globs so template scanning stays explicit and pinned to this package. */
+@source '../index.html';
+@source './**/*.{ts,tsx}';
+
+/* v4 changed the default border/divide colour from gray-200 to currentColor.
+ * The app has ~137 bare `border` utilities that rely on the old default, so
+ * restore it here (the compatibility snippet from Tailwind's upgrade guide)
+ * rather than repaint every call site. */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentColor);
+  }
+}
 
 /* ---------------------------------------------------------------------------
  * Design tokens & base typography — single place for the app's look.
@@ -15,7 +32,7 @@
   }
   body {
     @apply bg-slate-100 text-slate-900;
-    background-image: linear-gradient(180deg, theme('colors.slate.50'), theme('colors.slate.100') 240px);
+    background-image: linear-gradient(180deg, var(--color-slate-50), var(--color-slate-100) 240px);
   }
   h1 {
     @apply tracking-tight;

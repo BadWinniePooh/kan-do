@@ -1,4 +1,4 @@
-import type PgBoss from 'pg-boss';
+import type { PgBoss } from 'pg-boss';
 import type { Db } from '../db/index.js';
 import type { ObjectStorage } from '../adapters/storage.js';
 import type { Mailer } from '../adapters/mailer.js';

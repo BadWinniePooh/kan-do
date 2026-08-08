@@ -10,14 +10,17 @@ export async function createFcmPush(): Promise<PushSender> {
   if (!config.fcm.enabled) {
     return { enabled: false, send: async () => {} };
   }
-  const admin = await import('firebase-admin');
+  // firebase-admin v14 dropped the `admin.credential` / `admin.messaging()`
+  // namespace off the root export in favour of the modular subpath API.
+  const { initializeApp, cert } = await import('firebase-admin/app');
+  const { getMessaging } = await import('firebase-admin/messaging');
   const creds = JSON.parse(readFileSync(config.fcm.credentialsFile, 'utf-8'));
-  const app = admin.default.initializeApp({ credential: admin.default.credential.cert(creds) });
+  const app = initializeApp({ credential: cert(creds) });
   return {
     enabled: true,
     async send(tokens, title, body, data) {
       if (tokens.length === 0) return;
-      await admin.default.messaging(app).sendEachForMulticast({
+      await getMessaging(app).sendEachForMulticast({
         tokens,
         notification: { title, body },
         data,
