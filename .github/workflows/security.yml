@@ -81,40 +81,17 @@ jobs:
         with:
           category: /language:javascript-typescript
 
-  # Flags dependencies a PR would newly introduce. PR-only: it diffs base vs head.
-  #
-  # Needs the repository's "Dependency graph" setting to be on
-  # (Settings -> Advanced Security -> Dependency graph). Until it is, the action
-  # exits with "Dependency review is not supported on this repository", which is a
-  # missing repo feature rather than a real finding -- so the review step is
-  # advisory for now and the reason is written to the job summary. Turn the
-  # setting on, then delete the continue-on-error line to make it a blocking
-  # gate. The `audit` job above already hard-fails on high/critical, so the tree
-  # is still gated meanwhile; what is deferred is the base-vs-head diff that
-  # catches a newly introduced vulnerable dependency.
+  # Flags dependencies a PR would newly introduce. PR-only: it diffs base vs head,
+  # which is the one thing the `audit` job cannot see -- audit judges the resolved
+  # tree, this judges the change. Requires the repository's "Dependency graph"
+  # setting, which is enabled.
   dependency-review:
     name: Dependency review
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
-      - id: review
-        uses: actions/dependency-review-action@v4
-        continue-on-error: true
+      - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
           comment-summary-in-pr: on-failure
-      - name: Explain an incomplete review
-        if: steps.review.outcome != 'success'
-        run: |
-          {
-            echo '> [!NOTE]'
-            echo '> Dependency review did not complete, so this job is reporting only.'
-            echo '> It needs the repository setting **Dependency graph**'
-            echo '> (Settings -> Advanced Security). Once that is on, drop the'
-            echo '> `continue-on-error` line in `.github/workflows/security.yml` to make'
-            echo '> this a blocking gate.'
-            echo '>'
-            echo '> The **Dependency audit** job is unaffected and still hard-fails on'
-            echo '> high or critical advisories.'
-          } >> "$GITHUB_STEP_SUMMARY"
