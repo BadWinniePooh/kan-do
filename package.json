@@ -9,5 +9,10 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "migrate": "pnpm --filter server migrate:up"
+  },
+  "pnpm": {
+    "overrides": {
+      "uuid": ">=11.1.1"
+    }
   }
 }

@@ -2,7 +2,7 @@
  * pg-boss wrapper. Postgres-backed: jobs survive restarts, singleton keys make
  * scheduling idempotent (re-scheduling the same reopen twice is a no-op).
  */
-import PgBoss from 'pg-boss';
+import { PgBoss } from 'pg-boss';
 import { config } from '../config.js';
 
 export const QUEUES = {

@@ -1,0 +1,97 @@
+name: Security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Weekly, so newly published advisories against unchanged code still surface.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A PR branch gets both a push and a pull_request event; keep only the newer run.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Known CVEs in the resolved dependency tree.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Audit (fails on high or critical)
+        run: pnpm audit --audit-level high
+      - name: Full advisory report
+        # Runs even when the gate above fails, so the summary always lists every
+        # advisory — including the low/moderate ones that do not block.
+        if: always()
+        run: |
+          pnpm audit --json > audit.json || true
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          with open('audit.json') as fh:
+              data = json.load(fh)
+          counts = data.get('metadata', {}).get('vulnerabilities', {})
+          advisories = data.get('advisories', {})
+          print('## Dependency audit\n')
+          print('| severity | count |', '\n| --- | --- |', sep='')
+          for level in ('critical', 'high', 'moderate', 'low', 'info'):
+              print(f'| {level} | {counts.get(level, 0)} |')
+          if advisories:
+              print('\n| package | severity | vulnerable | patched | advisory |')
+              print('| --- | --- | --- | --- | --- |')
+              for a in advisories.values():
+                  print(
+                      f"| `{a['module_name']}` | {a['severity']} | {a.get('vulnerable_versions','')} "
+                      f"| {a.get('patched_versions','')} | {a['title']} |"
+                  )
+          else:
+              print('\nNo known advisories.')
+          PY
+
+  # Static analysis of our own source, not the dependencies. Deliberately not run
+  # on every branch push -- it is far slower than the audit, so it is scoped to
+  # pull requests, main, and the weekly schedule.
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+
+  # Flags dependencies a PR would newly introduce. PR-only: it diffs base vs head,
+  # which is the one thing the `audit` job cannot see -- audit judges the resolved
+  # tree, this judges the change. Requires the repository's "Dependency graph"
+  # setting, which is enabled.
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
