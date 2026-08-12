@@ -12,7 +12,8 @@ stack rationale and design.
 
 ## Local development
 
-Prereqs: Node 22, pnpm 9, Docker.
+Prereqs: Node 22, pnpm 11, Docker. `corepack enable` picks up the exact version
+from the `packageManager` field.
 
 ```bash
 pnpm install

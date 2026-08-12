@@ -9,9 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # pnpm version comes from packageManager in package.json — one source of truth
       - uses: pnpm/action-setup@v6
-        with:
-          version: 9.15.0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -44,9 +43,8 @@ jobs:
       DATABASE_URL: postgres://kando:kando@localhost:5432/kando_test
     steps:
       - uses: actions/checkout@v7
+      # pnpm version comes from packageManager in package.json — one source of truth
       - uses: pnpm/action-setup@v6
-        with:
-          version: 9.15.0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -70,9 +68,8 @@ jobs:
           cp .env.example .env
           echo "SESSION_SECRET=ci-secret-$(openssl rand -hex 16)" >> .env
           docker compose up -d --build
+      # pnpm version comes from packageManager in package.json — one source of truth
       - uses: pnpm/action-setup@v6
-        with:
-          version: 9.15.0
       - uses: actions/setup-node@v7
         with:
           node-version: 22

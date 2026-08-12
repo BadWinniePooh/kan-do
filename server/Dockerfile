@@ -1,6 +1,6 @@
 # Kan-Do API server + worker image (same image, different command)
 FROM node:22-alpine AS build
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.21.0 --activate
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/shared/package.json packages/shared/
@@ -11,7 +11,7 @@ COPY server server
 RUN pnpm --filter @kan-do/server build
 
 FROM node:22-alpine
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.21.0 --activate
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml ./
