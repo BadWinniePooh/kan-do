@@ -1,0 +1,151 @@
+# Kan-Do public deployment behind an EXISTING Traefik instance.
+#
+#   cp .env.example .env      # set APP_HOST, S3_HOST, SESSION_SECRET, passwords
+#   docker compose -f docker-compose.traefik.yml up -d
+#
+# Traefik itself is deliberately NOT defined here — this stack only attaches to
+# the network your Traefik already watches, so it can be deployed and torn down
+# without touching your reverse proxy.
+#
+# Nothing publishes a host port: every inbound request arrives through Traefik.
+# Postgres and the MinIO console stay unreachable from outside the Docker
+# network (use `docker compose exec` or an SSH tunnel to reach them).
+#
+# Two routers are needed, not one. The browser fetches attachments and avatars
+# straight from object storage via presigned URLs, so the S3 API has to be
+# publicly resolvable as well as the app itself. The presigned signature covers
+# the host, which is why the server signs against S3_PUBLIC_ENDPOINT (= S3_HOST)
+# rather than the internal address.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kando}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-kando}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks: [internal]
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    volumes:
+      - minio-data:/data
+    networks: [internal, traefik]
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    labels:
+      - 'traefik.enable=true'
+      # the container listens on two ports (9000 API, 9001 console); name the
+      # network and the port explicitly or Traefik has to guess both
+      - 'traefik.docker.network=${TRAEFIK_NETWORK:-traefik}'
+      - 'traefik.http.routers.kando-s3.rule=Host(`${S3_HOST:?set S3_HOST in .env}`)'
+      - 'traefik.http.routers.kando-s3.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}'
+      - 'traefik.http.routers.kando-s3.tls=true'
+      - 'traefik.http.routers.kando-s3.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}'
+      - 'traefik.http.services.kando-s3.loadbalancer.server.port=9000'
+
+  server:
+    image: ${IMAGE_SERVER:-ghcr.io/badwinniepooh/kan-do-server:latest}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment: &app-env
+      NODE_ENV: production
+      PORT: '3001'
+      # public origin is the Traefik hostname; SSO callback URLs and the CORS
+      # origin are both derived from it
+      PUBLIC_URL: https://${APP_HOST:?set APP_HOST in .env}
+      WEB_ORIGIN: https://${APP_HOST:?set APP_HOST in .env}
+      DATABASE_URL: postgres://${POSTGRES_USER:-kando}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-kando}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      # internal address for the server's own calls, public one for the URLs it
+      # signs for browsers
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: https://${S3_HOST:?set S3_HOST in .env}
+      S3_BUCKET: ${S3_BUCKET:-kando}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-kan-do@example.com}
+      FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks: [internal]
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3001/readyz || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    image: ${IMAGE_SERVER:-ghcr.io/badwinniepooh/kan-do-server:latest}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ['node', 'dist/worker.js']
+    environment: *app-env
+    depends_on:
+      server:
+        condition: service_healthy
+    networks: [internal]
+    restart: unless-stopped
+    # the worker exposes no HTTP; liveness = the node process is running
+    healthcheck:
+      test: ['CMD-SHELL', "pgrep -f 'dist/worker.js' >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  web:
+    image: ${IMAGE_WEB:-ghcr.io/badwinniepooh/kan-do-web:latest}
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    depends_on:
+      - server
+    networks: [internal, traefik]
+    restart: unless-stopped
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.docker.network=${TRAEFIK_NETWORK:-traefik}'
+      - 'traefik.http.routers.kando-web.rule=Host(`${APP_HOST:?set APP_HOST in .env}`)'
+      - 'traefik.http.routers.kando-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}'
+      - 'traefik.http.routers.kando-web.tls=true'
+      - 'traefik.http.routers.kando-web.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}'
+      - 'traefik.http.services.kando-web.loadbalancer.server.port=80'
+
+networks:
+  # created and owned by your Traefik deployment; this stack only joins it
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}
+  # private stack network: db, server and worker are reachable only in here
+  internal:
+
+volumes:
+  db-data:
+  minio-data:

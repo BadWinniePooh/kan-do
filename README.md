@@ -49,15 +49,68 @@ pnpm --filter @kan-do/e2e test                 # smoke, needs full stack up
 
 ## Self-hosted deployment
 
+Two compose files, same images: `docker-compose.yml` publishes ports on the
+host, `docker-compose.traefik.yml` publishes nothing and is reached through a
+reverse proxy you already run.
+
+### Local (published ports)
+
 ```bash
-cp .env.example .env    # set SESSION_SECRET (required) + public URLs
+cp .env.example .env    # set SESSION_SECRET (required)
 docker compose up -d
 ```
 
 - Web UI: `http://localhost:8080`
 - MinIO console: `http://localhost:9001`
-- Images are published by GitHub Actions to GHCR on pushes to `main` and `v*`
-  tags (`kan-do-server`, `kan-do-web`); compose uses them or builds locally.
+
+Every host port is configurable, and the public URLs follow whichever ports you
+pick — change `WEB_HOST_PORT` alone and `PUBLIC_URL` moves with it, so SSO
+callback URLs and the CORS origin cannot silently drift out of sync:
+
+| Variable | Default | Publishes |
+|---|---|---|
+| `WEB_HOST_PORT` | `8080` | web UI |
+| `S3_HOST_PORT` | `9000` | S3 API (browsers fetch attachments from it) |
+| `MINIO_CONSOLE_HOST_PORT` | `9001` | MinIO console |
+| `POSTGRES_HOST_PORT` | `55432` | Postgres, on loopback only |
+
+Set `PUBLIC_URL` / `S3_PUBLIC_ENDPOINT` explicitly only to override that
+derivation — for example when reaching the stack over a LAN address rather than
+`localhost`.
+
+### Public (behind an existing Traefik)
+
+```bash
+cp .env.example .env    # set APP_HOST, S3_HOST, SESSION_SECRET, passwords
+docker compose -f docker-compose.traefik.yml up -d
+```
+
+Traefik is **not** part of this compose file — the stack only joins the network
+your Traefik already watches (`TRAEFIK_NETWORK`, which must exist first), so it
+can be deployed and torn down without touching your proxy. No host ports are
+published: Postgres and the MinIO console are unreachable from outside the
+Docker network.
+
+**Two hostnames are required, not one.** Browsers fetch attachments and avatars
+directly from object storage through presigned URLs, so the S3 API needs its own
+public hostname alongside the app:
+
+| Variable | Purpose |
+|---|---|
+| `APP_HOST` | app hostname; `PUBLIC_URL` becomes `https://$APP_HOST` |
+| `S3_HOST` | object storage hostname; must differ from `APP_HOST` |
+| `TRAEFIK_NETWORK` | existing Docker network Traefik watches (default `traefik`) |
+| `TRAEFIK_ENTRYPOINT` | entrypoint name from your Traefik config (default `websecure`) |
+| `TRAEFIK_CERTRESOLVER` | cert resolver name from your Traefik config (default `letsencrypt`) |
+
+`TRAEFIK_ENTRYPOINT` and `TRAEFIK_CERTRESOLVER` name things defined in *your*
+Traefik static configuration — if the resolver does not exist there, the routers
+come up without a certificate. Compose fails fast with a named variable if any
+required value is missing, so a misconfigured `.env` never reaches a half-started
+stack.
+
+Images are published by GitHub Actions to GHCR on pushes to `main` and `v*` tags
+(`kan-do-server`, `kan-do-web`); both compose files use them or build locally.
 
 ### Configuration (all via environment)
 
