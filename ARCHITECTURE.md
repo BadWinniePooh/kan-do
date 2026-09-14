@@ -5,7 +5,7 @@
 | Layer | Choice | Why |
 |---|---|---|
 | Web + Android | React 18 + Vite + Tailwind, wrapped by **Capacitor** for Android | One codebase → consistent terminology/hierarchy across platforms (a spec requirement). Android is online-only, so a webview shell is a perfect fit and FCM push still works natively. |
-| Backend | Node 22 + TypeScript + **Fastify** + **Socket.IO** | First-class WebSockets, tiny surface, same language as frontend (shared types in `packages/shared`), trivial to Dockerize. |
+| Backend | Node 24 + TypeScript + **Fastify** + **Socket.IO** | First-class WebSockets, tiny surface, same language as frontend (shared types in `packages/shared`), trivial to Dockerize. |
 | Database | **PostgreSQL 16** via Kysely (typed SQL) + node-pg-migrate | Spec-mandated; Kysely keeps queries explicit and indexable; migrations are versioned and reversible (`up`/`down`, exercised in CI). |
 | Jobs | **pg-boss** (Postgres-backed queue) | Recurrence scheduling must survive restarts and never double-fire: pg-boss persists jobs in Postgres, leases them transactionally, and `singletonKey` makes re-scheduling idempotent. No extra infra (no Redis). |
 | Object storage | Any S3 API (**MinIO** in compose) via AWS SDK v3 | App needs only endpoint + credentials from env. Browsers upload/download through presigned URLs, so image bytes never pass through the API. |

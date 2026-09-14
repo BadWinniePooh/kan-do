@@ -11,7 +11,12 @@ on:
 permissions:
   contents: read
 
-# A PR branch gets both a push and a pull_request event; keep only the newer run.
+# Supersede an in-flight run when the same ref is pushed again, so a burst of
+# commits does not queue a scan per commit. This does NOT collapse the push and
+# pull_request runs of a PR branch: their github.ref values differ
+# (refs/heads/<branch> vs refs/pull/<n>/merge), so they are separate groups by
+# design -- the push run gives branch feedback, the pull_request run is the one
+# that can diff against the base.
 concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -22,13 +27,12 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      # pnpm version comes from packageManager in package.json — one source of truth
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
-          version: 9.15.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Audit (fails on high or critical)
@@ -72,12 +76,12 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
           queries: security-extended
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: /language:javascript-typescript
 
@@ -90,8 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
           comment-summary-in-pr: on-failure

@@ -3,3 +3,25 @@ packages:
   - web
   - e2e
   - packages/*
+
+# pnpm 10 moved these settings out of the "pnpm" key in package.json, and pnpm 11
+# ignores that key outright (warning only) — so they have to live here or they
+# silently stop applying.
+
+# Every patched uuid is ESM-only, and uuid is transitive via firebase-admin and
+# @capacitor/cli. The CJS requires in teeny-request and xcode resolve through
+# Node's require(esm), which needs Node >= 22.12 — matched by the Dockerfiles and
+# CI. Drop this once those dependencies ship a patched uuid themselves.
+overrides:
+  uuid: '>=11.1.1'
+
+# pnpm 10 stopped running dependency lifecycle scripts unless they are approved,
+# so a new dependency cannot silently execute code at install time. pnpm 11
+# expects that approval as this map rather than the older onlyBuiltDependencies
+# list. These three are exactly the ones that already ran under pnpm 9: esbuild
+# links its platform binary (the build fails without it), and the other two ship
+# postinstall steps used by firebase-admin.
+allowBuilds:
+  '@firebase/util': true
+  esbuild: true
+  protobufjs: true
