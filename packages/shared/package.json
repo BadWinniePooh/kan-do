@@ -10,8 +10,8 @@
     "lint": "eslint src"
   },
   "devDependencies": {
-    "eslint": "^10.8.1",
+    "eslint": "^10.10.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.66.0"
+    "typescript-eslint": "^8.70.0"
   }
 }
